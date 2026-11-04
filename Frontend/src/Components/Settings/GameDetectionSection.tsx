@@ -444,6 +444,13 @@ export default function GameDetectionSection() {
   );
 }
 
+const MODE_LABELS: Record<RecordingMode, string> = {
+  Hybrid: 'Hybrid',
+  Session: 'Session',
+  Buffer: 'Replay Buffer',
+  DiskBuffer: 'Disk Buffer',
+};
+
 function GamePanel({
   game,
   iconId,
@@ -494,6 +501,7 @@ function GamePanel({
         recordingMode: settings.recordingMode,
         replayBufferDuration: settings.replayBufferDuration,
         replayBufferMaxSize: settings.replayBufferMaxSize,
+        diskBufferDuration: settings.diskBufferDuration,
       },
     });
 
@@ -543,14 +551,14 @@ function GamePanel({
       {/* Recording mode override */}
       <OverrideSection
         title="Recording Mode"
-        description="Override whether this game records a full session, a replay buffer, or both."
+        description="Override whether this game records a full session, a replay buffer, a disk buffer, or both."
         enabled={mode != null}
         onToggle={(enabled) => (enabled ? enableMode() : onUpdate({ recordingModeOverride: null }))}
       >
         {mode && (
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-3">
-              {(['Hybrid', 'Session', 'Buffer'] as RecordingMode[]).map((m) => (
+            <div className="grid grid-cols-2 gap-3">
+              {(['Hybrid', 'Session', 'Buffer', 'DiskBuffer'] as RecordingMode[]).map((m) => (
                 <button
                   key={m}
                   onClick={() => onUpdate({ recordingModeOverride: { ...mode, recordingMode: m } })}
@@ -558,7 +566,7 @@ function GamePanel({
                     mode.recordingMode === m ? 'border-primary' : 'border-base-400'
                   }`}
                 >
-                  {m === 'Hybrid' ? 'Hybrid' : m === 'Session' ? 'Session' : 'Replay Buffer'}
+                  {MODE_LABELS[m]}
                 </button>
               ))}
             </div>
@@ -627,6 +635,63 @@ function GamePanel({
                         <span className="absolute inset-y-0 right-3 flex items-center text-sm opacity-60 pointer-events-none">
                           MB
                         </span>
+                      </div>
+                    </div>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence initial={false}>
+              {mode.recordingMode === 'DiskBuffer' && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{
+                    opacity: 1,
+                    height: 'fit-content',
+                    transition: {
+                      duration: 0.3,
+                      height: { type: 'spring', stiffness: 300, damping: 30 },
+                    },
+                  }}
+                  exit={{ opacity: 0, height: 0, transition: { duration: 0.2 } }}
+                  style={{ overflow: 'visible' }}
+                >
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="form-control">
+                      <label className="label text-base-content px-0 !block">
+                        <span className="label-text">Disk Buffer Length</span>
+                      </label>
+                      <div className="relative w-full">
+                        <input
+                          type="number"
+                          min={30}
+                          max={1800}
+                          defaultValue={mode.diskBufferDuration ?? settings.diskBufferDuration}
+                          onBlur={(e) =>
+                            onUpdate({
+                              recordingModeOverride: {
+                                ...mode,
+                                diskBufferDuration:
+                                  e.target.value.trim() === ''
+                                    ? null
+                                    : clampInt(
+                                        e.target.value,
+                                        30,
+                                        1800,
+                                        settings.diskBufferDuration,
+                                      ),
+                              },
+                            })
+                          }
+                          className="input input-bordered bg-base-300 w-full pr-12 outline-none focus:border-base-400"
+                        />
+                        <span className="absolute inset-y-0 right-3 flex items-center text-sm opacity-60 pointer-events-none">
+                          sec
+                        </span>
+                      </div>
+                      <div className="mt-1 px-1 text-xs opacity-70 leading-snug">
+                        Leave blank to use the global {settings.diskBufferDuration} sec.
                       </div>
                     </div>
                   </div>
