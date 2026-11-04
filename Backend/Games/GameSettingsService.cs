@@ -20,6 +20,7 @@ namespace Segra.Backend.Games
         public RecordingMode RecordingMode { get; set; } = RecordingMode.Hybrid;
         public int ReplayBufferDuration { get; set; } = 30;
         public int ReplayBufferMaxSize { get; set; } = 1000;
+        public int DiskBufferDuration { get; set; } = 1800;
         public bool DiscardSessionsWithoutBookmarks { get; set; }
         public bool EnableHdr { get; set; } = true;
 
@@ -81,6 +82,7 @@ namespace Segra.Backend.Games
                 RecordingMode = s.RecordingMode,
                 ReplayBufferDuration = s.ReplayBufferDuration,
                 ReplayBufferMaxSize = s.ReplayBufferMaxSize,
+                DiskBufferDuration = s.DiskBufferDuration,
                 DiscardSessionsWithoutBookmarks = s.DiscardSessionsWithoutBookmarks,
                 EnableHdr = s.EnableHdr
             };
@@ -95,6 +97,7 @@ namespace Segra.Backend.Games
                 eff.RecordingMode = match.RecordingModeOverride.RecordingMode;
                 eff.ReplayBufferDuration = match.RecordingModeOverride.ReplayBufferDuration;
                 eff.ReplayBufferMaxSize = match.RecordingModeOverride.ReplayBufferMaxSize;
+                eff.DiskBufferDuration = match.RecordingModeOverride.DiskBufferDuration ?? eff.DiskBufferDuration;
             }
 
             if (match.DiscardSessionsWithoutBookmarksOverride.HasValue)
