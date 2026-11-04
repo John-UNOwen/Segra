@@ -3933,10 +3933,31 @@ namespace Segra.Backend.Recorder
         private static long GetRecordingFreeSpaceThresholdBytes()
         {
             long intervalSeconds = DiskSpaceCheckIntervalMs / 1000;
-            long perIntervalWithMargin = (long)(EstimateRecordingBytesPerSecond() * intervalSeconds * 1.5);
+            long bytesPerInterval = EstimateRecordingBytesPerSecond() * intervalSeconds;
             const long finalizationBufferBytes = 128L * 1024 * 1024; // 128 MB to finalize the file
+
+            // The disk buffer only grows by what pruning fails to reclaim; reserving headroom for
+            // the raw write rate would stop a healthy disk recording once its window fills.
+            if (DiskBufferService.IsActive)
+                bytesPerInterval = GetDiskBufferGrowthBytesPerInterval(intervalSeconds);
+
+            long perIntervalWithMargin = (long)(bytesPerInterval * 1.5);
             long threshold = perIntervalWithMargin + finalizationBufferBytes;
             return Math.Max(StorageService.MinimumRecordingFreeSpaceBytes, threshold);
+        }
+
+        // Bytes the rolling disk buffer actually adds per check interval: the write rate minus what
+        // pruning has been reclaiming, since the window is bounded. Before the first prune the whole
+        // window is still being written, and a save pins the segments so reclaim pauses; both keep
+        // the full write rate, and a prune that stops working raises the headroom back up.
+        private static long GetDiskBufferGrowthBytesPerInterval(long intervalSeconds)
+        {
+            long writeBytes = EstimateRecordingBytesPerSecond() * intervalSeconds;
+            if (DiskBufferService.IsSaving)
+                return writeBytes;
+
+            long reclaimedBytesPerInterval = (long)DiskBufferService.EstimateReclaimedBytesPerSecond() * intervalSeconds;
+            return Math.Max(0, writeBytes - reclaimedBytesPerInterval);
         }
 
         // Disk buffer preflight: the whole rolling window at the estimated worst-case bitrate plus
@@ -4001,6 +4022,20 @@ namespace Segra.Backend.Recorder
                 );
 
                 long? freeBytes = StorageService.GetContentDriveFreeBytes();
+                string driveLabel = "Recording drive";
+
+                // In disk buffer mode the growth happens on the buffer drive and only a saved copy
+                // lands on the content drive, so the lower of the two is the one to guard.
+                if (DiskBufferService.IsActive)
+                {
+                    long? bufferFreeBytes = StorageService.GetDriveFreeBytes(DiskBufferService.ResolvedRoot());
+                    if (bufferFreeBytes != null && (freeBytes == null || bufferFreeBytes.Value < freeBytes.Value))
+                    {
+                        freeBytes = bufferFreeBytes;
+                        driveLabel = "Disk buffer drive";
+                    }
+                }
+
                 if (freeBytes == null || freeBytes.Value >= GetRecordingFreeSpaceThresholdBytes())
                     return;
 
@@ -4017,14 +4052,14 @@ namespace Segra.Backend.Recorder
 
                 double freeMb = freeBytes.Value / (1024.0 * 1024.0);
                 long thresholdMb = GetRecordingFreeSpaceThresholdBytes() / (1024 * 1024);
-                Log.Warning($"Recording drive low on space ({freeMb:F0} MB free, threshold {thresholdMb} MB). Stopping recording to finalize the file safely.");
+                Log.Warning($"{driveLabel} low on space ({freeMb:F0} MB free, threshold {thresholdMb} MB). Stopping recording to finalize the file safely.");
 
                 _ = Task.Run(async () =>
                 {
                     try
                     {
                         await ShowModal("Recording stopped: running low on disk space",
-                            $"The recording drive is running low on space ({freeMb:F0} MB free), so recording was stopped to save the file safely. Free up some space before recording again.",
+                            $"The {driveLabel.ToLowerInvariant()} is running low on space ({freeMb:F0} MB free), so recording was stopped to save the file safely. Free up some space before recording again.",
                             "error");
                         _ = Task.Run(() => PlaySound("error"));
                     }

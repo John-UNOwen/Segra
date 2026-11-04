@@ -45,11 +45,37 @@ namespace Segra.Backend.Recorder
         private static string _gameFolderName = "";
         private static int _durationSec;
         private static DateTime? _lastSaveEnd;
+        private static DateTime? _firstPruneAt;
+        private static long _prunedBytes;
         private static bool _stopping;
         private static TaskCompletionSource<string>? _splitSignaled;
         private static int _ffmpegProcessSeq;
+        private static int _saveActive;
 
         public static bool IsActive => _output != null;
+
+        /// <summary>
+        /// True while a save holds the save lock. Pinned segments cannot be pruned during a save, so
+        /// the rolling window stops reclaiming space for its duration.
+        /// </summary>
+        public static bool IsSaving => Volatile.Read(ref _saveActive) == 1;
+
+        /// <summary>
+        /// Average bytes per second pruning has reclaimed since it started for this recording, or 0
+        /// before the first segment has been pruned. OBSService subtracts it from the write rate to
+        /// get the disk buffer's net growth; a broken prune keeps it low and the headroom high.
+        /// </summary>
+        public static double EstimateReclaimedBytesPerSecond()
+        {
+            lock (_lock)
+            {
+                if (_firstPruneAt == null || _prunedBytes <= 0)
+                    return 0;
+
+                double seconds = (DateTime.Now - _firstPruneAt.Value).TotalSeconds;
+                return seconds > 0 ? _prunedBytes / seconds : 0;
+            }
+        }
 
         internal sealed record DiskBufferSaveResult(
             string OutputPath,
@@ -92,6 +118,8 @@ namespace Segra.Backend.Recorder
                 _gameFolderName = gameFolderName;
                 _durationSec = durationSec;
                 _lastSaveEnd = null;
+                _firstPruneAt = null;
+                _prunedBytes = 0;
                 _stopping = false;
                 _segments.Clear();
 
@@ -282,7 +310,14 @@ namespace Segra.Backend.Recorder
                 }
             }
             if (deleted > 0)
+            {
+                lock (_lock)
+                {
+                    _firstPruneAt ??= DateTime.Now;
+                    _prunedBytes += freedBytes;
+                }
                 Log.Information($"Pruned {deleted} disk buffer segment(s), {freedBytes / (1024.0 * 1024.0):F1} MB reclaimed");
+            }
         }
 
         /// <summary>
@@ -390,6 +425,7 @@ namespace Segra.Backend.Recorder
 
             _ = MessageService.SendFrontendMessage("ReplayBufferSaveStarted", new { });
             await _saveLock.WaitAsync();
+            Volatile.Write(ref _saveActive, 1);
 
             DateTime requestedAt = DateTime.Now;
             List<Segment> pinned = new();
@@ -560,6 +596,7 @@ namespace Segra.Backend.Recorder
                 }
                 if (concatPath != null)
                     DeleteQuietly(concatPath);
+                Volatile.Write(ref _saveActive, 0);
                 _saveLock.Release();
             }
         }
