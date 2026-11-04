@@ -826,6 +826,11 @@ namespace Segra.Backend.Recorder
                 // Set available encoders in state
                 SetAvailableEncodersInState();
 
+                // Segments left by a crash or hard kill are stale by definition. Purge them before
+                // IsInitialized opens the door to recording so a new disk buffer never starts in a
+                // folder mixed with the previous run's files.
+                DiskBufferService.PurgeAll();
+
                 IsInitialized = true;
                 AppState.Instance.HasLoadedObs = true;
                 Log.Information("OBS initialized successfully!");
