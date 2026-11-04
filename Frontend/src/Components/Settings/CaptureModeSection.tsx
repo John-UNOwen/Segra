@@ -24,6 +24,8 @@ export default function CaptureModeSection({ settings, updateSettings }: Capture
     );
   };
   const saveHotkey = hotkeyFor(HotkeyAction.SaveReplayBuffer, 'the Save Replay Buffer hotkey');
+  const diskBufferLength = formatBufferLength(settings.diskBufferDuration);
+  const diskBufferGb = diskBufferEstimateGb(settings);
 
   return (
     <div className="p-4 bg-base-300 rounded-lg shadow-md border border-base-400">
@@ -33,7 +35,7 @@ export default function CaptureModeSection({ settings, updateSettings }: Capture
           <span className="text-xs text-warning">(applies to next recording)</span>
         )}
       </div>
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 gap-4 xl:grid-cols-4">
         <div
           className={`bg-base-200 p-4 rounded-lg flex flex-col transition-all transition-200 border ${settings.recordingMode == 'Session' ? 'border-primary' : 'border-base-400'} cursor-pointer hover:bg-base-300`}
           onClick={() => updateSettings({ recordingMode: 'Session' })}
@@ -80,6 +82,26 @@ export default function CaptureModeSection({ settings, updateSettings }: Capture
             </p>
           </div>
         </div>
+        <div
+          className={`bg-base-200 p-4 rounded-lg flex flex-col transition-all transition-200 border ${settings.recordingMode == 'DiskBuffer' ? 'border-primary' : 'border-base-400'} cursor-pointer hover:bg-base-300`}
+          onClick={() => updateSettings({ recordingMode: 'DiskBuffer' })}
+        >
+          <div className="flex items-center gap-2 mb-3">
+            <div className="text-lg font-semibold">Disk Buffer</div>
+          </div>
+          <div className="text-sm text-left">
+            <p>
+              <span className="opacity-70">
+                Keeps the last {diskBufferLength} of gameplay on disk so you can save it as a clip.
+                Press {saveHotkey} to save.
+              </span>{' '}
+              <span className="text-primary">Uses disk space.</span>
+            </p>
+            <p className="opacity-70 mt-2">
+              Estimate: ~{diskBufferGb.toFixed(1)} GB for {diskBufferLength}.
+            </p>
+          </div>
+        </div>
       </div>
       <label className="flex items-center gap-3 cursor-pointer p-3 bg-base-200 rounded-lg border border-base-400 mt-4">
         <input
@@ -100,10 +122,18 @@ export default function CaptureModeSection({ settings, updateSettings }: Capture
   );
 }
 
-function formatBufferLength(seconds: number): string {
+export function formatBufferLength(seconds: number): string {
   if (seconds < 60) return `${seconds} seconds`;
   const minutes = Math.floor(seconds / 60);
   const rest = seconds % 60;
   const minutesText = `${minutes} minute${minutes === 1 ? '' : 's'}`;
   return rest === 0 ? minutesText : `${minutesText} ${rest} seconds`;
+}
+
+// Rough size of a disk buffer window: the configured maximum bitrate as a constant byte rate over
+// the whole duration. It is an estimate - a VBR encode lands below it, and the CPU encoder ignores
+// the bitrate under VBR entirely.
+export function diskBufferEstimateGb(settings: SettingsType): number {
+  const bytes = ((settings.maxBitrate * 1_000_000) / 8) * settings.diskBufferDuration;
+  return bytes / (1024 * 1024 * 1024);
 }
