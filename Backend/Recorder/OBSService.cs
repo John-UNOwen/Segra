@@ -3957,6 +3957,7 @@ namespace Segra.Backend.Recorder
                 return writeBytes;
 
             long reclaimedBytesPerInterval = (long)DiskBufferService.EstimateReclaimedBytesPerSecond() * intervalSeconds;
+            Log.Debug($"Disk buffer monitor headroom: {writeBytes} B written per interval, {reclaimedBytesPerInterval} B reclaimed by pruning");
             return Math.Max(0, writeBytes - reclaimedBytesPerInterval);
         }
 
