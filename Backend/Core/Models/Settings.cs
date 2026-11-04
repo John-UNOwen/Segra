@@ -80,6 +80,9 @@ namespace Segra.Backend.Core.Models
         private int _replayBufferDuration = 30;
         private int _replayBufferMaxSize = 1000;
         private bool _alwaysOnReplayBuffer = false;
+        private int _diskBufferDuration = 1800;
+        private string _diskBufferFolder = string.Empty;
+        private bool _diskBufferSaveSinceLastSave = true;
         private List<Hotkey> _hotkeys;
         private List<GameSetting> _games = new List<GameSetting>();
         private bool _autoRecordGames = true;
@@ -630,6 +633,49 @@ namespace Segra.Backend.Core.Models
         {
             get => _alwaysOnReplayBuffer;
             set => _alwaysOnReplayBuffer = value;
+        }
+
+        // Seconds of footage the Disk Buffer mode keeps on disk (30 s to 30 min), clamped on assignment.
+        [JsonPropertyName("diskBufferDuration")]
+        public int DiskBufferDuration
+        {
+            get => _diskBufferDuration;
+            set
+            {
+                int clamped = Math.Clamp(value, 30, 1800);
+                if (clamped != value)
+                {
+                    Log.Warning($"DiskBufferDuration '{value}' is outside 30-1800 seconds, using '{clamped}'");
+                }
+                if (_diskBufferDuration != clamped)
+                {
+                    _diskBufferDuration = clamped;
+                }
+            }
+        }
+
+        // Where the rolling disk buffer segments are written. Empty means "derive it at use time from
+        // <ContentFolder>/.diskbuffer"; that resolution happens when the buffer starts, not here.
+        [JsonPropertyName("diskBufferFolder")]
+        public string DiskBufferFolder
+        {
+            get => _diskBufferFolder;
+            set => _diskBufferFolder = Shared.PathUtils.Normalize(value ?? string.Empty);
+        }
+
+        // A disk buffer save covers footage since the previous save, mirroring the RAM buffer
+        // resetting after a save so the next save only holds new footage.
+        [JsonPropertyName("diskBufferSaveSinceLastSave")]
+        public bool DiskBufferSaveSinceLastSave
+        {
+            get => _diskBufferSaveSinceLastSave;
+            set
+            {
+                if (_diskBufferSaveSinceLastSave != value)
+                {
+                    _diskBufferSaveSinceLastSave = value;
+                }
+            }
         }
 
         // Legacy global flags, read only by the "per_device_input_options" migration, which copies them
@@ -1389,7 +1435,8 @@ namespace Segra.Backend.Core.Models
     {
         Session,
         Buffer,
-        Hybrid
+        Hybrid,
+        DiskBuffer
     }
 
     [JsonConverter(typeof(JsonStringEnumConverter<GpuPriority>))]
@@ -1561,6 +1608,11 @@ namespace Segra.Backend.Core.Models
 
         [JsonPropertyName("replayBufferMaxSize")]
         public int ReplayBufferMaxSize { get; set; } = 1000;
+
+        // Nullable on purpose: override JSON written before this setting existed has no key, and the
+        // game has to inherit the global DiskBufferDuration instead of a hardcoded default.
+        [JsonPropertyName("diskBufferDuration")]
+        public int? DiskBufferDuration { get; set; }
     }
 
     // Game integration settings - each game has its own settings object

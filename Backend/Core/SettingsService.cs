@@ -659,6 +659,47 @@ namespace Segra.Backend.Core
                 hasChanges = true;
             }
 
+            if (settings.DiskBufferDuration != updatedSettings.DiskBufferDuration)
+            {
+                Log.Information($"DiskBufferDuration changed from '{settings.DiskBufferDuration}' to '{updatedSettings.DiskBufferDuration}'");
+                settings.DiskBufferDuration = updatedSettings.DiskBufferDuration;
+                hasChanges = true;
+            }
+
+            if (settings.DiskBufferFolder != updatedSettings.DiskBufferFolder)
+            {
+                Log.Information($"DiskBufferFolder changed from '{settings.DiskBufferFolder}' to '{updatedSettings.DiskBufferFolder}'");
+
+                // An empty folder is valid: it means the buffer folder is derived from the content folder at use time
+                if (string.IsNullOrEmpty(updatedSettings.DiskBufferFolder))
+                {
+                    settings.DiskBufferFolder = updatedSettings.DiskBufferFolder;
+                    hasChanges = true;
+                }
+                else if (!IsAbsolutePath(updatedSettings.DiskBufferFolder))
+                {
+                    Log.Warning($"Ignoring disk buffer folder '{updatedSettings.DiskBufferFolder}': not an absolute path");
+                    rejectedFolder = true;
+                }
+                else if (IsInsideContentFolders(updatedSettings.DiskBufferFolder))
+                {
+                    Log.Warning($"Ignoring disk buffer folder '{updatedSettings.DiskBufferFolder}': inside a content folder");
+                    rejectedFolder = true;
+                }
+                else
+                {
+                    settings.DiskBufferFolder = updatedSettings.DiskBufferFolder;
+                    hasChanges = true;
+                }
+            }
+
+            if (settings.DiskBufferSaveSinceLastSave != updatedSettings.DiskBufferSaveSinceLastSave)
+            {
+                Log.Information($"DiskBufferSaveSinceLastSave changed from '{settings.DiskBufferSaveSinceLastSave}' to '{updatedSettings.DiskBufferSaveSinceLastSave}'");
+                settings.DiskBufferSaveSinceLastSave = updatedSettings.DiskBufferSaveSinceLastSave;
+                hasChanges = true;
+            }
+
             if (settings.Resolution != updatedSettings.Resolution)
             {
                 Log.Information($"Resolution changed from '{settings.Resolution}' to '{updatedSettings.Resolution}'");
@@ -969,6 +1010,31 @@ namespace Segra.Backend.Core
 
         private static bool IsAbsolutePath(string? path) =>
             !string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path);
+
+        // True when a folder is the same as, under, or a parent of one of the content-type folders under
+        // the content folder. Segments living there would be listed by the library scanner and counted
+        // or deleted by the storage-limit cleanup.
+        private static bool IsInsideContentFolders(string folder)
+        {
+            static string Canonical(string path) =>
+                PathUtils.Normalize(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)));
+
+            string candidate = Canonical(folder);
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+            foreach (var contentFolderName in new[] { FolderNames.Sessions, FolderNames.Buffers, FolderNames.Clips, FolderNames.Highlights })
+            {
+                string contentPath = Canonical(PathUtils.Combine(Settings.Instance.ContentFolder, contentFolderName));
+                if (string.Equals(candidate, contentPath, comparison) ||
+                    candidate.StartsWith(contentPath + Path.AltDirectorySeparatorChar, comparison) ||
+                    contentPath.StartsWith(candidate + Path.AltDirectorySeparatorChar, comparison))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
 
         private static bool TryCreateDirectory(string path)
         {
