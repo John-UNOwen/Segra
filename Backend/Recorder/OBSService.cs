@@ -1213,6 +1213,7 @@ namespace Segra.Backend.Recorder
             bool isReplayBufferMode = eff.RecordingMode == RecordingMode.Buffer;
             bool isSessionMode = eff.RecordingMode == RecordingMode.Session;
             bool isHybridMode = eff.RecordingMode == RecordingMode.Hybrid;
+            bool isDiskBufferMode = eff.RecordingMode == RecordingMode.DiskBuffer;
 
             string fileName = Path.GetFileName(exePath);
 
@@ -1838,13 +1839,46 @@ namespace Segra.Backend.Recorder
                 _output.Stopped += OnOutputStopped;
             }
 
+            if (isDiskBufferMode)
+            {
+                uint diskTracksMask = trackCount >= 32 ? uint.MaxValue : (1u << trackCount) - 1u;
+
+                // mkv is the only muxer OBS splits into segments. DiskBufferService subscribes
+                // file_changed (after SetFormat, which recreates the output), enables splitting,
+                // starts the output and keeps the segment ledger.
+                _output = new RecordingOutput("disk_buffer_output");
+                _output.SetFormat(RecordingFormat.Mkv);
+                _output.Update(s => s.Set("tracks", (long)diskTracksMask));
+
+                _output.WithVideoEncoder(_videoEncoder);
+                for (int t = 0; t < _audioEncoders.Count; t++)
+                {
+                    _output.WithAudioEncoder(_audioEncoders[t], track: t);
+                }
+
+                _output.Stopped += OnOutputStopped;
+
+                if (!DiskBufferService.Start(_output, sanitizedGameName, eff.DiskBufferDuration))
+                {
+                    // The service already disposed the output on failure. No HDR retry here: the
+                    // start failure is the whole disk pipeline, not just the encoder.
+                    _output = null;
+                    GameDetectionService.PreventRetryRecording = true;
+                    Task.Run(() => ShowModal("Disk buffer failed", "Failed to start the disk buffer recording. Check the log for more details.", "error"));
+                    Task.Run(() => PlaySound("error"));
+                    AppState.Instance.PreRecording = null;
+                    DisposeRecording();
+                    return false;
+                }
+            }
+
             // Overwrite the file name with the hooked executable name if using game hook
             fileName = _hookedExecutableFileName ?? fileName;
 
             DateTime? startTime = null;
             bool hasPlayedStartSound = false;
 
-            if (_output != null)
+            if (_output != null && !isDiskBufferMode)
             {
                 if (!_output.Start())
                 {
@@ -1868,6 +1902,13 @@ namespace Segra.Backend.Recorder
                 hasPlayedStartSound = true;
 
                 Log.Information("Session recording started successfully");
+            }
+            else if (isDiskBufferMode)
+            {
+                // The disk buffer output was already started by DiskBufferService.Start above.
+                startTime = DateTime.Now;
+                _ = Task.Run(() => PlaySound("start"));
+                hasPlayedStartSound = true;
             }
 
             if (_bufferOutput != null)
@@ -2351,7 +2392,16 @@ namespace Segra.Backend.Recorder
                             await WaitForInFlightReplaySaveAsync();
                             StopOutput(_bufferOutput, "replay buffer");
                         }
-                        StopOutput(_output, "recording");
+                        if (DiskBufferService.IsActive)
+                        {
+                            // Stops the disk buffer output (after any in-flight disk save), disposes
+                            // it and purges the recording's segments.
+                            await DiskBufferService.StopAsync();
+                        }
+                        else
+                        {
+                            StopOutput(_output, "recording");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -2699,6 +2749,8 @@ namespace Segra.Backend.Recorder
 
                     if (bufferActive)
                         _bufferOutput!.ForceStop();
+                    if (DiskBufferService.IsActive)
+                        DiskBufferService.ForceStop();
                     if (outputActive)
                         _output!.ForceStop();
 
@@ -3978,6 +4030,11 @@ namespace Segra.Backend.Recorder
             FailActiveReplaySave("The recording stopped before the replay finished saving. If the file completed, it can be recovered when Segra restarts.");
             lock (_replaySaveLock)
                 _previousSaveIndeterminate = false;
+
+            // Safety net: an active disk buffer owns its output's lifecycle (stop, purge). Normal
+            // teardown goes through StopRecording, which already stopped it.
+            if (DiskBufferService.IsActive)
+                DiskBufferService.StopAsync().GetAwaiter().GetResult();
 
             try { _output?.Dispose(); } catch (Exception ex) { Log.Warning($"Error disposing output: {ex.Message}"); }
             _output = null;
