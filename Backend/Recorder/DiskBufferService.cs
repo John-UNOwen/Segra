@@ -514,7 +514,10 @@ namespace Segra.Backend.Recorder
 
                 string? codec = await FFmpegService.DetectVideoCodec(selected[0].Path);
                 string tagArgs = codec == "hevc" ? " -tag:v hvc1" : "";
-                string arguments = $"-y -f concat -safe 0 -i \"{concatPath}\" -map 0 -c copy{tagArgs} \"{outputPath}\"";
+                // -map -0:d drops the mkv segments' chapter data track (a bin_data stream the
+                // muxer writes into every segment) and -map_chapters -1 the container chapters;
+                // same as ClipService's segment merge. Bookmarks come from the finalize step.
+                string arguments = $"-y -f concat -safe 0 -i \"{concatPath}\" -map 0 -map -0:d -map_chapters -1 -c copy{tagArgs} \"{outputPath}\"";
 
                 try
                 {
@@ -579,10 +582,12 @@ namespace Segra.Backend.Recorder
         /// first segment already trimmed by the inpoint). A bookmark recorded at wall time T crosses
         /// the junctions of all selected segments that ended at or before T, so:
         ///   position = (T - effectiveWindowStart) + paddingPerJunction * junctionsBefore(T)
-        /// clamped to [0, outputDuration]. effectiveWindowStart is the nominal inpoint cut; the real
-        /// cut snaps to the previous keyframe (up to 1 s early), so very early bookmarks may sit up
-        /// to ~1 s later in the file than computed. Bookmarks at or after the forced split inherit
-        /// the maximum padding and get clamped to the output end.
+        /// effectiveWindowStart is the nominal inpoint cut; the real cut snaps to the previous
+        /// keyframe (up to 1 s early), which shifts early bookmarks by up to ~1 s - the measured
+        /// padding absorbs that into paddingPerJunction. The position is intentionally left
+        /// unclamped: bookmarks recorded outside the saved window come back negative or past the
+        /// file duration and are dropped by the caller's range filter; clamping here instead would
+        /// leave a post-save bookmark sitting at the end of the replay.
         /// </summary>
         private static Func<DateTime, TimeSpan> BuildBookmarkResolver(
             List<Segment> selected,
@@ -604,7 +609,6 @@ namespace Segra.Backend.Recorder
                         junctions++;
                 }
                 position += paddingPerJunction * junctions;
-                position = Math.Clamp(position, 0, outputDuration.TotalSeconds);
                 return TimeSpan.FromSeconds(position);
             };
         }
