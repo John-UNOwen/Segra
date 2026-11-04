@@ -226,6 +226,8 @@ namespace Segra.Backend.Recorder
         {
             get
             {
+                if (DiskBufferService.IsActive)
+                    return true;
                 var mode = ActiveEffectiveSettings?.RecordingMode ?? Settings.Instance.RecordingMode;
                 return IsAlwaysOnBufferActive || (AppState.Instance.Recording != null && (mode == RecordingMode.Buffer || mode == RecordingMode.Hybrid));
             }
@@ -234,6 +236,15 @@ namespace Segra.Backend.Recorder
         // Saves with immediate feedback (sound + the app's shockwave); "ReplayBufferSaved" follows once OBS has written the file.
         public static void SaveReplayWithFeedback()
         {
+            if (DiskBufferService.IsActive)
+            {
+                // Disk saves assemble the file from segments instead of asking OBS; SaveAsync
+                // sends the "ReplayBufferSaveStarted" message itself.
+                _ = Task.Run(SaveDiskBufferReplay);
+                _ = Task.Run(() => PlatformServices.Sound.Play(Properties.Resources.bookmark, Settings.Instance.SoundEffectsVolume));
+                return;
+            }
+
             _ = SendFrontendMessage("ReplayBufferSaveStarted", new { });
             _ = Task.Run(SaveReplayBuffer);
             _ = Task.Run(() => PlatformServices.Sound.Play(Properties.Resources.bookmark, Settings.Instance.SoundEffectsVolume));
@@ -320,11 +331,39 @@ namespace Segra.Backend.Recorder
         }
 
         /// <summary>
+        /// Disk buffer counterpart of SaveReplayBuffer: DiskBufferService assembles the saved mp4
+        /// stream-copying the segments that cover the requested window (recording keeps running
+        /// throughout), then the shared finalize tail runs. Bookmarks use the save's own position
+        /// resolver because the concatenated timeline is wider than the playable content.
+        /// </summary>
+        public static async Task<bool> SaveDiskBufferReplay()
+        {
+            var recording = AppState.Instance.Recording ?? _alwaysOnBuffer;
+
+            var result = await DiskBufferService.SaveAsync();
+            if (result == null)
+                return false;
+
+            string? exePath = recording?.ExePath;
+            var request = new ReplaySaveRequest
+            {
+                Game = recording?.Game ?? "Unknown",
+                IgdbId = !string.IsNullOrEmpty(exePath) ? GameUtils.GetIgdbIdFromExePath(exePath) : null,
+                ExePath = exePath,
+                AudioTrackNames = recording?.AudioTrackNames,
+                AudioTrackTypes = recording?.AudioTrackTypes
+            };
+
+            await FinalizeSavedReplayAsync(result.OutputPath, request, recording, result.RequestedAt, result.BookmarkPositionFor);
+            return true;
+        }
+
+        /// <summary>
         /// Shared tail of a completed replay save: confirm the file to the frontend, wait until
         /// it is readable, create the metadata/thumbnail/waveform sidecars, refresh the content
         /// list and copy the recording's bookmarks that fall inside the saved replay.
         /// </summary>
-        private static async Task FinalizeSavedReplayAsync(string savedPath, ReplaySaveRequest request, Recording? recording, DateTime requestedAt)
+        private static async Task FinalizeSavedReplayAsync(string savedPath, ReplaySaveRequest request, Recording? recording, DateTime requestedAt, Func<DateTime, TimeSpan>? positionFor = null)
         {
             // The file is fully written at this point; let the frontend confirm the save.
             _ = MessageService.SendFrontendMessage("ReplayBufferSaved", new { });
@@ -341,7 +380,7 @@ namespace Segra.Backend.Recorder
             await SettingsService.LoadContentFromFolderIntoState(true);
 
             if (bufferId != null && recording != null)
-                await AddReplayBookmarks(recording, bufferId, requestedAt);
+                await AddReplayBookmarks(recording, bufferId, requestedAt, positionFor);
 
             Log.Information("Replay buffer save process completed successfully");
         }
@@ -349,8 +388,11 @@ namespace Segra.Backend.Recorder
         /// <summary>
         /// Copies the recording's bookmarks that fall inside a saved replay into it, including
         /// ones integrations add later (e.g. Rainbow Six Siege after the round ends).
+        /// positionFor maps a bookmark's wall-clock instant to its offset in the saved file; the
+        /// default assumes the replay ends at endedAt, which holds for the RAM buffer but not for
+        /// the disk buffer's concatenated output (see DiskBufferService.BuildBookmarkResolver).
         /// </summary>
-        private static async Task AddReplayBookmarks(Recording recording, string contentId, DateTime endedAt)
+        private static async Task AddReplayBookmarks(Recording recording, string contentId, DateTime endedAt, Func<DateTime, TimeSpan>? positionFor = null)
         {
             try
             {
@@ -362,7 +404,7 @@ namespace Segra.Backend.Recorder
                 DateTime startedAt = endedAt - duration;
 
                 List<Bookmark> InReplay(IEnumerable<Bookmark> bookmarks) => bookmarks
-                    .Select(b => new Bookmark { Id = b.Id, Type = b.Type, Subtype = b.Subtype, Time = recording.StartTime + b.Time - startedAt })
+                    .Select(b => new Bookmark { Id = b.Id, Type = b.Type, Subtype = b.Subtype, Time = positionFor != null ? positionFor(recording.StartTime + b.Time) : recording.StartTime + b.Time - startedAt })
                     .Where(b => b.Time >= TimeSpan.Zero && b.Time <= duration)
                     .ToList();
 
