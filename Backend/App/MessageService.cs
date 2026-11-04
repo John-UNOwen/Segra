@@ -718,7 +718,8 @@ namespace Segra.Backend.App
         [
             "recordingMode", "resolution", "frameRate", "rateControl", "bitrate", "minBitrate", "maxBitrate",
             "crfValue", "cqLevel", "encoder", "codec", "stretch4By3", "enableHdr", "replayBufferDuration",
-            "replayBufferMaxSize", "inputDevices", "outputDevices", "forceMonoInputSources", "inputNoiseSuppression",
+            "replayBufferMaxSize", "diskBufferDuration", "diskBufferFolder", "diskBufferSaveSinceLastSave",
+            "inputDevices", "outputDevices", "forceMonoInputSources", "inputNoiseSuppression",
             "enableSeparateAudioTracks", "audioOutputMode", "gameIntegrations"
         ];
 
