@@ -20,7 +20,8 @@ namespace Segra.Backend.App
         public static GithubSource BetaSource = new("https://github.com/Segergren/Segra", null, true);
         public static UpdateManager UpdateManager { get; private set; } = new(Source);
 
-#if LOCAL_BUILD
+#if LOCAL_BUILD || NO_UPSTREAM_AUTO_UPDATE
+        // Also covers this fork: upstream releases would overwrite it, so no update path runs at all.
         private static readonly bool IsLocalBuild = true;
 #else
         private static readonly bool IsLocalBuild = false;

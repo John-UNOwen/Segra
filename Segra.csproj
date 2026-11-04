@@ -54,6 +54,13 @@
     <DefineConstants>$(DefineConstants);LOCAL_BUILD</DefineConstants>
   </PropertyGroup>
 
+  <!-- This fork is not published to the upstream release feed, so it must never replace itself
+       with an upstream build. Drop this constant when the fork has its own release feed, and
+       point UpdateService.Source/BetaSource at the fork instead. -->
+  <PropertyGroup>
+    <DefineConstants>$(DefineConstants);NO_UPSTREAM_AUTO_UPDATE</DefineConstants>
+  </PropertyGroup>
+
   <!-- Linux-only build settings -->
   <PropertyGroup Condition="'$(TargetFramework)' == 'net10.0'">
     <OutputType>Exe</OutputType>
