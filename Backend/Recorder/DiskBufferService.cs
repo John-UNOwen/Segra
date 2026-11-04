@@ -490,11 +490,15 @@ namespace Segra.Backend.Recorder
                 outputPath = GetUniqueFilePath(PathUtils.Combine(outputFolder, $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4"));
 
                 concatPath = Path.Combine(Path.GetTempPath(), $"segra_disk_buffer_concat_{Guid.NewGuid():N}.txt");
+                // Concat demuxer options apply to the file line they follow, so the inpoint goes
+                // after the first file, not before it.
                 var listLines = new List<string>();
-                if (inpointSeconds > 0)
-                    listLines.Add($"inpoint {inpointSeconds.ToString(CultureInfo.InvariantCulture)}");
-                foreach (Segment segment in selected)
-                    listLines.Add(FFmpegService.BuildConcatListLine(segment.Path));
+                for (int i = 0; i < selected.Count; i++)
+                {
+                    listLines.Add(FFmpegService.BuildConcatListLine(selected[i].Path));
+                    if (i == 0 && inpointSeconds > 0)
+                        listLines.Add($"inpoint {inpointSeconds.ToString(CultureInfo.InvariantCulture)}");
+                }
                 await File.WriteAllTextAsync(concatPath, string.Join("\n", listLines) + "\n");
 
                 // Playable content the window actually contributes, for the progress estimate and
