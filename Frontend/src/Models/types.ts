@@ -2,7 +2,7 @@ import type { HoverIntentHandlers } from '../Hooks/useHoverIntent';
 
 export type ContentType = 'Session' | 'Buffer' | 'Clip' | 'Highlight';
 
-export type RecordingMode = 'Session' | 'Buffer' | 'Hybrid';
+export type RecordingMode = 'Session' | 'Buffer' | 'Hybrid' | 'DiskBuffer';
 
 export type AudioOutputMode = 'All' | 'GameOnly' | 'GameAndDiscord';
 export type AudioTrackType = 'mix' | 'input' | 'output';
@@ -195,6 +195,8 @@ export interface GameRecordingModeOverride {
   recordingMode: RecordingMode;
   replayBufferDuration: number;
   replayBufferMaxSize: number;
+  // Missing/null means the game inherits the global diskBufferDuration
+  diskBufferDuration?: number | null;
 }
 
 // A single entry in the unified per-game settings list (replaces whitelist/blacklist).
@@ -334,6 +336,9 @@ export interface Settings {
   replayBufferDuration: number; // in seconds
   replayBufferMaxSize: number; // in MB
   alwaysOnReplayBuffer: boolean; // Keep a display replay buffer running while nothing records
+  diskBufferDuration: number; // Disk Buffer mode: seconds of footage kept on disk (30-1800)
+  diskBufferFolder: string; // Empty means the backend derives <contentFolder>/.diskbuffer at use time
+  diskBufferSaveSinceLastSave: boolean; // A disk buffer save covers footage since the previous save
   highlightPaddingBefore: number; // Seconds before a highlight moment
   highlightPaddingAfter: number; // Seconds after a highlight moment
   clipClearSegmentsAfterCreatingClip: boolean;
@@ -429,6 +434,9 @@ export const initialSettings: Settings = {
   replayBufferDuration: 30,
   replayBufferMaxSize: 1000,
   alwaysOnReplayBuffer: false,
+  diskBufferDuration: 1800,
+  diskBufferFolder: '',
+  diskBufferSaveSinceLastSave: true,
   highlightPaddingBefore: 4,
   highlightPaddingAfter: 4,
   clipClearSegmentsAfterCreatingClip: false,
