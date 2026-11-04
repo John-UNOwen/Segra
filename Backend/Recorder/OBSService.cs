@@ -302,24 +302,7 @@ namespace Segra.Backend.Recorder
                 savedPath = PathUtils.Normalize(savedPath);
                 Log.Information($"Replay buffer saved to: {savedPath}");
 
-                // The file is fully written at this point; let the frontend confirm the save.
-                _ = MessageService.SendFrontendMessage("ReplayBufferSaved", new { });
-
-                // Ensure file is fully written to disk/network before thumbnail generation
-                await EnsureFileReady(savedPath);
-
-                // Create metadata for the buffer recording
-                string? bufferId = await ContentService.CreateMetadataFile(savedPath, Content.ContentType.Buffer, request.Game, igdbId: request.IgdbId, audioTrackNames: request.AudioTrackNames, audioTrackTypes: request.AudioTrackTypes, gameExePath: request.ExePath);
-                await ContentService.CreateThumbnail(savedPath, Content.ContentType.Buffer, bufferId);
-                await ContentService.CreateWaveformFile(savedPath, Content.ContentType.Buffer, bufferId);
-
-                // Reload content list to include the new buffer file
-                await SettingsService.LoadContentFromFolderIntoState(true);
-
-                if (bufferId != null && recording != null)
-                    await AddReplayBookmarks(recording, bufferId, requestedAt);
-
-                Log.Information("Replay buffer save process completed successfully");
+                await FinalizeSavedReplayAsync(savedPath, request, recording, requestedAt);
 
                 // Restart replay buffer so subsequent saves only include new footage, unless a
                 // recording stop began while the save was completing.
@@ -334,6 +317,33 @@ namespace Segra.Backend.Recorder
                     _activeReplaySave = null;
                 _replaySaveSemaphore.Release();
             }
+        }
+
+        /// <summary>
+        /// Shared tail of a completed replay save: confirm the file to the frontend, wait until
+        /// it is readable, create the metadata/thumbnail/waveform sidecars, refresh the content
+        /// list and copy the recording's bookmarks that fall inside the saved replay.
+        /// </summary>
+        private static async Task FinalizeSavedReplayAsync(string savedPath, ReplaySaveRequest request, Recording? recording, DateTime requestedAt)
+        {
+            // The file is fully written at this point; let the frontend confirm the save.
+            _ = MessageService.SendFrontendMessage("ReplayBufferSaved", new { });
+
+            // Ensure file is fully written to disk/network before thumbnail generation
+            await EnsureFileReady(savedPath);
+
+            // Create metadata for the buffer recording
+            string? bufferId = await ContentService.CreateMetadataFile(savedPath, Content.ContentType.Buffer, request.Game, igdbId: request.IgdbId, audioTrackNames: request.AudioTrackNames, audioTrackTypes: request.AudioTrackTypes, gameExePath: request.ExePath);
+            await ContentService.CreateThumbnail(savedPath, Content.ContentType.Buffer, bufferId);
+            await ContentService.CreateWaveformFile(savedPath, Content.ContentType.Buffer, bufferId);
+
+            // Reload content list to include the new buffer file
+            await SettingsService.LoadContentFromFolderIntoState(true);
+
+            if (bufferId != null && recording != null)
+                await AddReplayBookmarks(recording, bufferId, requestedAt);
+
+            Log.Information("Replay buffer save process completed successfully");
         }
 
         /// <summary>
