@@ -1304,6 +1304,19 @@ namespace Segra.Backend.Recorder
                 return false;
             }
 
+            // Disk buffer mode additionally needs room for the rolling segment window on the segment
+            // drive (and on the content drive too when saves go somewhere else). When it does not
+            // fit, record this session with the RAM replay buffer instead of blocking the start;
+            // the configured DiskBuffer mode is left untouched.
+            if (isDiskBufferMode && !HasDiskBufferFreeSpace(eff.DiskBufferDuration, out string? diskBufferSpaceProblem))
+            {
+                Log.Warning($"Disk buffer preflight failed, falling back to the replay buffer for this recording: {diskBufferSpaceProblem}");
+                Task.Run(() => ShowModal("Not enough disk space for disk buffer", $"{diskBufferSpaceProblem} This recording will use the replay buffer (RAM) instead.", "warning"));
+                eff.RecordingMode = RecordingMode.Buffer;
+                isDiskBufferMode = false;
+                isReplayBufferMode = true;
+            }
+
             // Reset the stopping flag when starting a new recording
             _isStoppingOrStopped = false;
             _unexpectedStopHandled = 0;
@@ -3919,6 +3932,44 @@ namespace Segra.Backend.Recorder
             const long finalizationBufferBytes = 128L * 1024 * 1024; // 128 MB to finalize the file
             long threshold = perIntervalWithMargin + finalizationBufferBytes;
             return Math.Max(StorageService.MinimumRecordingFreeSpaceBytes, threshold);
+        }
+
+        // Disk buffer preflight: the whole rolling window at the estimated worst-case bitrate plus
+        // 15% mux overhead, and that much again as headroom (segments keep being written while old
+        // ones are deleted, and saves add a file on the content drive). Checked on the segment
+        // drive and, when different, on the content drive. Drives we cannot query are skipped so
+        // an unreadable drive never blocks recording; the in-recording monitor still guards.
+        private static bool HasDiskBufferFreeSpace(int durationSec, out string? problem)
+        {
+            problem = null;
+
+            long required = (long)(EstimateRecordingBytesPerSecond() * durationSec * 1.15 * 2);
+
+            string segmentRoot = DiskBufferService.ResolvedRoot();
+            var drives = new List<(string Label, string Path)> { ("Disk buffer", segmentRoot) };
+            string contentFolder = Settings.Instance.ContentFolder;
+            if (!PathsOnSameDrive(segmentRoot, contentFolder))
+                drives.Add(("Content", contentFolder));
+
+            foreach (var (label, path) in drives)
+            {
+                long? free = StorageService.GetDriveFreeBytes(path);
+                if (free == null)
+                    continue;
+                if (free.Value < required)
+                {
+                    problem = $"The {label} drive ({StorageService.GetDriveRoot(path) ?? path}) has {free.Value / (1024.0 * 1024.0):F0} MB free; the disk buffer needs about {required / (1024.0 * 1024.0):F0} MB for the {durationSec}s window.";
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        private static bool PathsOnSameDrive(string a, string b)
+        {
+            string? rootA = StorageService.GetDriveRoot(PathUtils.Normalize(a));
+            string? rootB = StorageService.GetDriveRoot(PathUtils.Normalize(b));
+            return !string.IsNullOrEmpty(rootA) && string.Equals(rootA, rootB, StringComparison.OrdinalIgnoreCase);
         }
 
         private static void StopDiskSpaceMonitor()

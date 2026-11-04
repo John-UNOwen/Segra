@@ -55,16 +55,15 @@ namespace Segra.Backend.Windows.Storage
         internal static string? GetDriveRoot(string path) =>
             OperatingSystem.IsWindows() ? Path.GetPathRoot(path) : path;
 
-        // Returns the free space (in bytes) on the drive holding the content folder,
+        // Returns the free space (in bytes) on the drive holding the given path,
         // or null if it cannot be determined (so callers can choose not to act on errors).
-        public static long? GetContentDriveFreeBytes()
+        public static long? GetDriveFreeBytes(string path)
         {
             try
             {
-                string contentFolder = Settings.Instance.ContentFolder;
-                if (string.IsNullOrEmpty(contentFolder)) return null;
+                if (string.IsNullOrEmpty(path)) return null;
 
-                string? root = GetDriveRoot(contentFolder);
+                string? root = GetDriveRoot(path);
                 if (string.IsNullOrEmpty(root)) return null;
 
                 var drive = new DriveInfo(root);
@@ -74,10 +73,14 @@ namespace Segra.Backend.Windows.Storage
             }
             catch (Exception ex)
             {
-                Log.Warning($"Error checking content drive free space: {ex.Message}");
+                Log.Warning($"Error checking free space on drive '{path}': {ex.Message}");
                 return null;
             }
         }
+
+        // Returns the free space (in bytes) on the drive holding the content folder,
+        // or null if it cannot be determined (so callers can choose not to act on errors).
+        public static long? GetContentDriveFreeBytes() => GetDriveFreeBytes(Settings.Instance.ContentFolder);
 
         public static (double UsedGb, double FreeGb)? GetContentDriveSpaceGb()
         {
