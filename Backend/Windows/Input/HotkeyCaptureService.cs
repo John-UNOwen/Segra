@@ -353,7 +353,10 @@ namespace Segra.Backend.Windows.Input
             switch (action)
             {
                 case HotkeyAction.CreateBookmark:
-                    if (recording != null && (recordingMode == RecordingMode.Session || recordingMode == RecordingMode.Hybrid))
+                    // DiskBuffer keeps a live Recording like Session/Hybrid, so manual bookmarks
+                    // apply (they land in the saved replays); the RAM Buffer modes have no per-
+                    // recording timeline and keep using integration bookmarks only.
+                    if (recording != null && (recordingMode == RecordingMode.Session || recordingMode == RecordingMode.Hybrid || recordingMode == RecordingMode.DiskBuffer))
                     {
                         Log.Information("Saving bookmark...");
                         var bookmark = new Bookmark
