@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import DropdownSelect from '../DropdownSelect';
 import BitrateInput from './BitrateInput';
@@ -9,6 +9,7 @@ import { sendMessageToBackend } from '../../Utils/MessageUtils';
 import { clampInt } from '../../Utils/NumberUtils';
 import { useAppState } from '../../Context/AppStateContext';
 import HevcExtensionWarning, { isHevcEncoder } from '../HevcExtensionWarning';
+import { diskBufferEstimateGb, formatBufferLength } from './CaptureModeSection';
 import {
   usePendingRecordingSettings,
   RECORDING_SETTING_GROUPS,
@@ -38,6 +39,10 @@ export default function VideoSettingsSection({
   const [localReplayBufferMaxSize, setLocalReplayBufferMaxSize] = useState<string>(
     String(settings.replayBufferMaxSize),
   );
+  const [localDiskBufferDuration, setLocalDiskBufferDuration] = useState<string>(
+    String(settings.diskBufferDuration),
+  );
+  const [localDiskBufferFolder, setLocalDiskBufferFolder] = useState(settings.diskBufferFolder);
   const [localCrfValue, setLocalCrfValue] = useState<string>(String(settings.crfValue));
   const [localCqLevel, setLocalCqLevel] = useState<string>(String(settings.cqLevel));
 
@@ -50,6 +55,14 @@ export default function VideoSettingsSection({
   }, [settings.replayBufferMaxSize]);
 
   useEffect(() => {
+    setLocalDiskBufferDuration(String(settings.diskBufferDuration));
+  }, [settings.diskBufferDuration]);
+
+  useEffect(() => {
+    setLocalDiskBufferFolder(settings.diskBufferFolder);
+  }, [settings.diskBufferFolder]);
+
+  useEffect(() => {
     setLocalCrfValue(String(settings.crfValue));
   }, [settings.crfValue]);
 
@@ -57,6 +70,16 @@ export default function VideoSettingsSection({
     setLocalCqLevel(String(settings.cqLevel));
   }, [settings.cqLevel]);
   const hasPendingChanges = usePendingRecordingSettings(RECORDING_SETTING_GROUPS.video);
+
+  const diskBufferLength = formatBufferLength(settings.diskBufferDuration);
+  const diskBufferGb = diskBufferEstimateGb(settings);
+  // The segment folder the backend derives when Disk Buffer Folder is left empty
+  const recordingPath = (settings.contentFolder || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const derivedDiskBufferFolder = `${recordingPath}/.diskbuffer`;
+
+  const blurOnEnter = (e: KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') e.currentTarget.blur();
+  };
 
   const handlePresetChange = (preset: VideoQualityPreset) => {
     sendMessageToBackend('ApplyVideoPreset', { preset });
@@ -268,6 +291,106 @@ export default function VideoSettingsSection({
                 </div>
               </div>
             </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Disk Buffer Settings - Only show when the disk buffer mode is selected */}
+      <AnimatePresence initial={false}>
+        {settings.recordingMode === 'DiskBuffer' && (
+          <motion.div
+            className="bg-base-300"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{
+              opacity: 1,
+              height: 'fit-content',
+              transition: {
+                duration: 0.3,
+                height: { type: 'spring', stiffness: 300, damping: 30 },
+              },
+            }}
+            exit={{
+              opacity: 0,
+              height: 0,
+              transition: {
+                duration: 0.2,
+              },
+            }}
+            style={{ overflow: 'visible' }}
+          >
+            <motion.div
+              className="grid grid-cols-2 gap-4"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1, transition: { delay: 0.2 } }}
+            >
+              {/* Disk Buffer Length */}
+              <div className="form-control w-full">
+                <label htmlFor="diskBufferDuration" className="label text-base-content px-0 !block">
+                  <span className="label-text">Disk Buffer Length</span>
+                </label>
+                <div className="relative w-full">
+                  <input
+                    id="diskBufferDuration"
+                    type="number"
+                    name="diskBufferDuration"
+                    value={localDiskBufferDuration}
+                    onChange={(e) => setLocalDiskBufferDuration(e.target.value)}
+                    onBlur={() => {
+                      const val = clampInt(localDiskBufferDuration, 30, 1800, 300);
+                      setLocalDiskBufferDuration(String(val));
+                      updateSettings({ diskBufferDuration: val });
+                    }}
+                    min="30"
+                    max="1800"
+                    className="input input-bordered bg-base-200 disabled:bg-base-200 disabled:input-bordered disabled:opacity-80 w-full pr-12 outline-none focus:border-base-400"
+                  />
+                  <span className="absolute inset-y-0 right-3 flex items-center text-sm opacity-60 pointer-events-none">
+                    sec
+                  </span>
+                </div>
+                <div className="mt-1 px-1 text-xs opacity-70 leading-snug">
+                  Footage kept on disk, older segments are deleted as new ones are written. Applies
+                  to your next recording.
+                </div>
+              </div>
+
+              {/* Disk Buffer Folder */}
+              <div className="form-control w-full">
+                <label htmlFor="diskBufferFolder" className="label text-base-content px-0 !block">
+                  <span className="label-text">Disk Buffer Folder</span>
+                </label>
+                <input
+                  id="diskBufferFolder"
+                  type="text"
+                  name="diskBufferFolder"
+                  value={localDiskBufferFolder}
+                  onChange={(e) => setLocalDiskBufferFolder(e.target.value)}
+                  onBlur={() => {
+                    if (localDiskBufferFolder !== settings.diskBufferFolder) {
+                      updateSettings({ diskBufferFolder: localDiskBufferFolder });
+                    }
+                  }}
+                  onKeyDown={blurOnEnter}
+                  placeholder={derivedDiskBufferFolder}
+                  className="input input-bordered bg-base-200 w-full"
+                />
+                <div className="mt-1 px-1 text-xs opacity-70 leading-snug">
+                  Empty uses {derivedDiskBufferFolder}. Prefer an HDD or a second drive. Applies to
+                  your next recording.
+                </div>
+              </div>
+            </motion.div>
+            <div className="mt-2 px-1 text-xs opacity-70 leading-snug">
+              Estimate: ~{diskBufferGb.toFixed(1)} GB for {diskBufferLength} of segments. Saving a
+              full window writes a second copy, so the peak is about {diskBufferGb.toFixed(1)} GB
+              more.
+            </div>
+            {settings.rateControl === 'VBR' && settings.encoder === 'cpu' && (
+              <div className="mt-1 px-1 text-xs text-warning leading-snug">
+                Estimate uses the maximum bitrate. The CPU encoder ignores the bitrate under VBR, so
+                real usage varies with what is on screen.
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
