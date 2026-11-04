@@ -14,6 +14,10 @@ namespace Segra.Backend.Shared
         public const string Clips = "Clips";
         public const string Highlights = "Highlights";
 
+        // Rolling disk buffer segment folder (default under the content folder). Not a content type:
+        // nothing inside it is ever library content.
+        public const string DiskBuffer = ".diskbuffer";
+
         // Legacy folder names (for migration purposes)
         public const string LegacySessions = "sessions";
         public const string LegacyBuffers = "buffers";
@@ -35,6 +39,43 @@ namespace Segra.Backend.Shared
         /// This is configurable via Settings, with default at C:\Users\{user}\AppData\Roaming\Segra
         /// </summary>
         public static string CacheFolder => PathUtils.Normalize(Settings.Instance.CacheFolder);
+
+        /// <summary>
+        /// Gets the root folder holding the disk buffer's per-game segment folders: the configured
+        /// DiskBufferFolder, or the DiskBuffer folder under the content folder when none is set.
+        /// </summary>
+        public static string GetDiskBufferRoot()
+        {
+            string configured = Settings.Instance.DiskBufferFolder ?? "";
+            if (!string.IsNullOrWhiteSpace(configured))
+                return PathUtils.Normalize(configured);
+
+            return PathUtils.Combine(Settings.Instance.ContentFolder, DiskBuffer);
+        }
+
+        /// <summary>
+        /// True when a path is the disk buffer root or lives under it. Compared on normalized path
+        /// components against the resolved root, not against the folder name, so a buffer the user
+        /// moved somewhere else is still recognized.
+        /// </summary>
+        public static bool IsDiskBufferPath(string path)
+        {
+            string root = GetDiskBufferRoot();
+            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(path))
+                return false;
+
+            string candidate = path.Replace("\\", "/").TrimEnd('/');
+            string bufferRoot = root.Replace("\\", "/").TrimEnd('/');
+            if (candidate.Length == 0 || bufferRoot.Length == 0)
+                return false;
+
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+
+            return string.Equals(candidate, bufferRoot, comparison) ||
+                candidate.StartsWith(bufferRoot + "/", comparison);
+        }
 
         /// <summary>
         /// Gets the video folder name for a content type.
@@ -139,6 +180,11 @@ namespace Segra.Backend.Shared
         /// </summary>
         public static Content.ContentType? GetContentTypeFromPath(string path)
         {
+            // Disk buffer segments are raw rolling footage, never content, wherever the buffer
+            // folder points.
+            if (IsDiskBufferPath(path))
+                return null;
+
             string normalizedPath = path.Replace("\\", "/").ToLower();
 
             // Check new folder names first

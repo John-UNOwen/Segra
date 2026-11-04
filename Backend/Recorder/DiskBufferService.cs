@@ -71,13 +71,7 @@ namespace Segra.Backend.Recorder
         /// Folder holding the per-game segment folders: the configured DiskBufferFolder, or
         /// .diskbuffer under the content folder when none is configured.
         /// </summary>
-        public static string ResolvedRoot()
-        {
-            string configured = Settings.Instance.DiskBufferFolder ?? "";
-            if (!string.IsNullOrWhiteSpace(configured))
-                return PathUtils.Normalize(configured);
-            return PathUtils.Normalize(PathUtils.Combine(Settings.Instance.ContentFolder, ".diskbuffer"));
-        }
+        public static string ResolvedRoot() => FolderNames.GetDiskBufferRoot();
 
         /// <summary>
         /// Takes over an OBSService-configured output: enables file splitting under the resolved

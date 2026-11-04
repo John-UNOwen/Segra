@@ -211,19 +211,38 @@ namespace Segra.Backend.Windows.Storage
 
         internal static long CalculateFolderSize(string folderPath)
         {
+            var options = new EnumerationOptions { RecurseSubdirectories = false, IgnoreInaccessible = true, AttributesToSkip = 0 };
             long size = 0;
-            string[] files = Directory.GetFiles(folderPath, "*", new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = 0 });
 
-            foreach (string file in files)
+            // One level at a time instead of a recursive scan, so the disk buffer subtree is skipped
+            // whole rather than filtered file by file: this walks the entire content tree at startup.
+            var folders = new Stack<string>();
+            folders.Push(PathUtils.Normalize(folderPath));
+
+            while (folders.Count > 0)
             {
-                FileInfo fileInfo = new FileInfo(file);
-                try
+                string folder = folders.Pop();
+
+                foreach (string file in Directory.GetFiles(folder, "*", options))
                 {
-                    size += fileInfo.Length;
+                    FileInfo fileInfo = new FileInfo(file);
+                    try
+                    {
+                        size += fileInfo.Length;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning($"Error calculating size for file {PathUtils.Normalize(file)}: {ex.Message}");
+                    }
                 }
-                catch (Exception ex)
+
+                foreach (string subFolder in Directory.GetDirectories(folder, "*", options))
                 {
-                    Log.Warning($"Error calculating size for file {PathUtils.Normalize(file)}: {ex.Message}");
+                    string normalized = PathUtils.Normalize(subFolder);
+                    // Rolling segments are not content: they must not count toward the storage limit.
+                    if (FolderNames.IsDiskBufferPath(normalized))
+                        continue;
+                    folders.Push(normalized);
                 }
             }
 
@@ -246,7 +265,7 @@ namespace Segra.Backend.Windows.Storage
                 // Search recursively to find files in game subfolders
                 var sessionFiles = Directory.GetFiles(sessionsFolder, "*", SearchOption.AllDirectories)
                     .Select(f => new FileInfo(f))
-                    .Where(f => f.LastWriteTime < oneHourAgo);
+                    .Where(f => f.LastWriteTime < oneHourAgo && !FolderNames.IsDiskBufferPath(f.FullName));
 
                 deletionCandidates.AddRange(sessionFiles);
                 Log.Information($"Found {sessionFiles.Count()} eligible session files older than 1 hour");
@@ -257,7 +276,7 @@ namespace Segra.Backend.Windows.Storage
                 // Search recursively to find files in game subfolders
                 var bufferFiles = Directory.GetFiles(buffersFolder, "*", SearchOption.AllDirectories)
                     .Select(f => new FileInfo(f))
-                    .Where(f => f.LastWriteTime < oneHourAgo);
+                    .Where(f => f.LastWriteTime < oneHourAgo && !FolderNames.IsDiskBufferPath(f.FullName));
 
                 deletionCandidates.AddRange(bufferFiles);
                 Log.Information($"Found {bufferFiles.Count()} eligible buffer files older than 1 hour");
