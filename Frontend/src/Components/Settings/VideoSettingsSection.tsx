@@ -391,6 +391,21 @@ export default function VideoSettingsSection({
                 real usage varies with what is on screen.
               </div>
             )}
+            <label className="flex items-center gap-3 cursor-pointer p-3 bg-base-200 rounded-lg border border-base-400 mt-3">
+              <input
+                type="checkbox"
+                checked={settings.diskBufferSaveSinceLastSave}
+                onChange={(e) => updateSettings({ diskBufferSaveSinceLastSave: e.target.checked })}
+                className="checkbox checkbox-primary checkbox-sm"
+              />
+              <div>
+                <div className="font-semibold">Save Since Last Save</div>
+                <div className="text-sm opacity-70 mt-0.5">
+                  Each save takes only the footage recorded since the previous save. Turn it off and
+                  every save takes the whole buffer window again.
+                </div>
+              </div>
+            </label>
           </motion.div>
         )}
       </AnimatePresence>
