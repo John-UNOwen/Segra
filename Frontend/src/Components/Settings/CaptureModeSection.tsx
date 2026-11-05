@@ -130,10 +130,23 @@ export function formatBufferLength(seconds: number): string {
   return rest === 0 ? minutesText : `${minutesText} ${rest} seconds`;
 }
 
-// Rough size of a disk buffer window: the configured maximum bitrate as a constant byte rate over
-// the whole duration. It is an estimate - a VBR encode lands below it, and the CPU encoder ignores
-// the bitrate under VBR entirely.
+// OBSService.EstimateRecordingBytesPerSecond: the rate it assumes for the quality-based controls
+// that have no bitrate cap, and the headroom it allows for the audio tracks.
+const QUALITY_MODE_ASSUMED_MBPS = 150;
+const AUDIO_HEADROOM_MBPS = 1;
+
+// Rough size of a disk buffer window: the bitrate the recording actually writes at, held as a
+// constant byte rate over the whole duration, plus the audio headroom. It follows the rate control
+// the way the backend does - the Bitrate setting under CBR, the maximum under VBR, an assumed high
+// rate for CRF and CQP - so a CBR setup sees the figure its preflight uses. It is an estimate - a
+// VBR encode lands below it, and the CPU encoder ignores the bitrate under VBR entirely.
 export function diskBufferEstimateGb(settings: SettingsType): number {
-  const bytes = ((settings.maxBitrate * 1_000_000) / 8) * settings.diskBufferDuration;
+  const videoMbps =
+    settings.rateControl === 'CBR'
+      ? settings.bitrate
+      : settings.rateControl === 'VBR'
+        ? settings.maxBitrate
+        : Math.max(settings.maxBitrate, QUALITY_MODE_ASSUMED_MBPS);
+  const bytes = ((videoMbps + AUDIO_HEADROOM_MBPS) * 1_000_000 * settings.diskBufferDuration) / 8;
   return bytes / (1024 * 1024 * 1024);
 }
