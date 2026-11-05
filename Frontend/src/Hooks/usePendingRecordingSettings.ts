@@ -22,7 +22,6 @@ export const RECORDING_SETTING_GROUPS = {
     'replayBufferMaxSize',
     'diskBufferDuration',
     'diskBufferFolder',
-    'diskBufferSaveSinceLastSave',
   ],
   audio: ['inputDevices', 'outputDevices', 'enableSeparateAudioTracks', 'audioOutputMode'],
   gameIntegrations: ['gameIntegrations'],

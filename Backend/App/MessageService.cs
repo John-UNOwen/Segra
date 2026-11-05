@@ -718,10 +718,13 @@ namespace Segra.Backend.App
         [
             "recordingMode", "resolution", "frameRate", "rateControl", "bitrate", "minBitrate", "maxBitrate",
             "crfValue", "cqLevel", "encoder", "codec", "stretch4By3", "enableHdr", "replayBufferDuration",
-            "replayBufferMaxSize", "diskBufferDuration", "diskBufferFolder", "diskBufferSaveSinceLastSave",
+            "replayBufferMaxSize", "diskBufferDuration", "diskBufferFolder",
             "inputDevices", "outputDevices", "forceMonoInputSources", "inputNoiseSuppression",
             "enableSeparateAudioTracks", "audioOutputMode", "gameIntegrations"
         ];
+
+        // diskBufferSaveSinceLastSave is deliberately not in that list: the disk buffer reads it at
+        // save time, so it must not be reported as a change that waits for the next recording.
 
         // Serialized exactly like the Settings message so the frontend can compare values directly
         public static JsonObject GetRecordingStartSettings()
