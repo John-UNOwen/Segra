@@ -410,7 +410,8 @@ namespace Segra.Backend.Recorder
         /// <summary>
         /// Builds a saved replay: forces the current segment to close, selects the closed segments
         /// covering the window (since the previous save when DiskBufferSaveSinceLastSave is on,
-        /// otherwise the full buffer duration), and stream-copies them into one mp4. Returns the
+        /// otherwise the full buffer duration), and stream-copies them into one mp4, assembled in the
+        /// segment folder and moved into Replay Buffers only after ffmpeg succeeded. Returns the
         /// output path, the wall-clock save instant and a bookmark position resolver; null when
         /// nothing could be saved or ffmpeg failed (user is informed here, sidecars are OBSService's
         /// job). Recording keeps running throughout.
@@ -432,6 +433,7 @@ namespace Segra.Backend.Recorder
             List<Segment> selected = new();
             string? concatPath = null;
             string? outputPath = null;
+            string? stagedPath = null;
             bool succeeded = false;
 
             try
@@ -517,7 +519,13 @@ namespace Segra.Backend.Recorder
 
                 string outputFolder = PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Buffers, _gameFolderName);
                 Directory.CreateDirectory(outputFolder);
-                outputPath = GetUniqueFilePath(PathUtils.Combine(outputFolder, $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4"));
+                string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4";
+                outputPath = GetUniqueFilePath(PathUtils.Combine(outputFolder, fileName));
+                // ffmpeg assembles into the segment folder and the finished file is moved into the
+                // library at the end. The segment folder is never listed as content and the startup
+                // purge empties it, so a save killed mid-concat leaves a stale segment there instead
+                // of a half-written replay the library would present as complete.
+                stagedPath = PathUtils.Combine(_segmentFolder, fileName);
 
                 concatPath = Path.Combine(Path.GetTempPath(), $"segra_disk_buffer_concat_{Guid.NewGuid():N}.txt");
                 // Concat demuxer options apply to the file line they follow, so the inpoint goes
@@ -547,7 +555,7 @@ namespace Segra.Backend.Recorder
                 // -map -0:d drops the mkv segments' chapter data track (a bin_data stream the
                 // muxer writes into every segment) and -map_chapters -1 the container chapters;
                 // same as ClipService's segment merge. Bookmarks come from the finalize step.
-                string arguments = $"-y -f concat -safe 0 -i \"{concatPath}\" -map 0 -map -0:d -map_chapters -1 -c copy{tagArgs} \"{outputPath}\"";
+                string arguments = $"-y -f concat -safe 0 -i \"{concatPath}\" -map 0 -map -0:d -map_chapters -1 -c copy{tagArgs} \"{stagedPath}\"";
 
                 try
                 {
@@ -561,20 +569,32 @@ namespace Segra.Backend.Recorder
                 {
                     Log.Error($"Disk buffer replay concat failed (exit {ex.ExitCode}): {FFmpegErrors.Summarize(ex)}");
                     await MessageService.ShowModal("Replay Save Failed", FFmpegErrors.DescribeForUser(ex), "error");
-                    DeleteQuietly(outputPath);
                     return null;
                 }
                 catch (Exception ex)
                 {
                     Log.Error(ex, "Disk buffer replay concat failed unexpectedly");
                     await MessageService.ShowModal("Replay Save Failed", "The replay could not be assembled from the disk buffer segments. Check the log for details.", "error");
-                    DeleteQuietly(outputPath);
                     return null;
                 }
 
-                if (!File.Exists(outputPath))
+                if (!File.Exists(stagedPath))
                 {
-                    Log.Error($"Disk buffer replay concat reported success but produced no file: {outputPath}");
+                    Log.Error($"Disk buffer replay concat reported success but produced no file: {stagedPath}");
+                    return null;
+                }
+
+                // Only a finished concat is moved into the library folders. A save interrupted before
+                // this point leaves its output in the segment folder, where the library never looks
+                // and the startup purge deletes it.
+                try
+                {
+                    File.Move(stagedPath, outputPath);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, $"Failed to move the assembled replay into the library: {outputPath}");
+                    await MessageService.ShowModal("Replay Save Failed", "The replay was assembled but could not be added to the library. Check the log for details.", "error");
                     return null;
                 }
 
@@ -596,6 +616,8 @@ namespace Segra.Backend.Recorder
                 }
                 if (concatPath != null)
                     DeleteQuietly(concatPath);
+                if (!succeeded)
+                    DeleteQuietly(stagedPath);
                 Volatile.Write(ref _saveActive, 0);
                 _saveLock.Release();
             }
