@@ -91,6 +91,9 @@ namespace Segra.Tests.Recorder
                 _staging, _library, FileName, ConcatLines(), "", 61.2, steps);
 
             Assert.False(outcome.Succeeded);
+            Assert.False(string.IsNullOrWhiteSpace(outcome.Reason));
+            Assert.False(string.IsNullOrWhiteSpace(outcome.UserMessage));
+            Assert.True(outcome.StagedPreserved);
             Assert.Empty(FilesUnder(_library));
 
             string[] staged = FilesUnder(_staging);
@@ -101,6 +104,59 @@ namespace Segra.Tests.Recorder
         // A folder that never got created holds nothing; a failed publish must not create one either.
         private static string[] FilesUnder(string folder, string pattern = "*") =>
             Directory.Exists(folder) ? Directory.GetFiles(folder, pattern) : Array.Empty<string>();
+
+        [Fact]
+        public async Task AFailingConcatExplainsItselfInsteadOfThrowing()
+        {
+            // %TEMP% full or unwritable, the content folder moved away mid-recording, ffmpeg out of
+            // process space: the assembly step is where those land, and the save that reaches them has
+            // no catch of its own. A failure has to come back as a failure with a reason, and the
+            // partial ffmpeg left behind must not survive as a file with a replay's name.
+            var steps = new ConcatFailsPartway();
+
+            var outcome = await DiskBufferSaveAssembly.RunAsync(
+                _staging, _library, FileName, ConcatLines(), "", 61.2, steps);
+
+            Assert.False(outcome.Succeeded);
+            Assert.False(string.IsNullOrWhiteSpace(outcome.Reason));
+            Assert.False(string.IsNullOrWhiteSpace(outcome.UserMessage));
+            Assert.False(outcome.StagedPreserved);
+            Assert.Empty(FilesUnder(_staging));
+            Assert.Empty(FilesUnder(_library));
+        }
+
+        [Fact]
+        public async Task AnUnusableOutputFolderExplainsItselfInsteadOfThrowing()
+        {
+            // The recording's library folder deleted or replaced by a file while the recording ran:
+            // creating it is the first thing the assembly does, and a throw from here used to vanish
+            // into a task nobody was watching.
+            string blocked = Path.Combine(_root, "blocked");
+            File.WriteAllText(blocked, "not a folder");
+            string libraryFolder = Path.Combine(blocked, "Manual Recording");
+
+            var outcome = await DiskBufferSaveAssembly.RunAsync(
+                _staging, libraryFolder, FileName, ConcatLines(), "", 61.2, new RenamingSteps());
+
+            Assert.False(outcome.Succeeded);
+            Assert.False(string.IsNullOrWhiteSpace(outcome.Reason));
+            Assert.False(string.IsNullOrWhiteSpace(outcome.UserMessage));
+            Assert.Empty(FilesUnder(_staging));
+        }
+
+        /// <summary>ffmpeg writes part of the file and then fails.</summary>
+        private sealed class ConcatFailsPartway : DiskBufferSaveAssembly.ISteps
+        {
+            public Task RunConcatAsync(string ffmpegArguments, string stagedPath, double expectedContentSeconds)
+            {
+                File.WriteAllText(stagedPath, "half a replay");
+                throw new IOException("There is not enough space on the disk");
+            }
+
+            public void MoveFile(string source, string destination) => File.Move(source, destination);
+
+            public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
+        }
 
         /// <summary>The normal case: the staged file is renamed into its library name.</summary>
         private sealed class RenamingSteps : DiskBufferSaveAssembly.ISteps

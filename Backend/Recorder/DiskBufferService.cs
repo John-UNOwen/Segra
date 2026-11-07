@@ -41,7 +41,6 @@ namespace Segra.Backend.Recorder
         private static string _gameFolderName = "";
         private static DateTime? _lastSaveEnd;
         private static TaskCompletionSource<string>? _splitSignaled;
-        private static int _ffmpegProcessSeq;
 
         public static bool IsActive => _output != null && _ledger != null;
 
@@ -385,9 +384,7 @@ namespace Segra.Backend.Recorder
             DateTime requestedAt = DateTime.Now;
             List<DiskBufferSegment> selected = new();
             List<DiskBufferSegment> dropped = new();
-            string? concatPath = null;
             string? outputPath = null;
-            string? stagedPath = null;
             bool succeeded = false;
 
             try
@@ -459,28 +456,6 @@ namespace Segra.Backend.Recorder
                     inpointSeconds = 0;
                 DateTime effectiveWindowStart = selected[0].StartedAt + TimeSpan.FromSeconds(inpointSeconds);
 
-                string outputFolder = PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Buffers, _gameFolderName);
-                Directory.CreateDirectory(outputFolder);
-                string fileName = $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4";
-                outputPath = GetUniqueFilePath(PathUtils.Combine(outputFolder, fileName));
-                // ffmpeg assembles into the segment folder and the finished file is moved into the
-                // library at the end. The segment folder is never listed as content and the startup
-                // purge empties it, so a save killed mid-concat leaves a stale segment there instead
-                // of a half-written replay the library would present as complete.
-                stagedPath = PathUtils.Combine(_segmentFolder, fileName);
-
-                concatPath = Path.Combine(Path.GetTempPath(), $"segra_disk_buffer_concat_{Guid.NewGuid():N}.txt");
-                // Concat demuxer options apply to the file line they follow, so the inpoint goes
-                // after the first file, not before it.
-                var listLines = new List<string>();
-                for (int i = 0; i < selected.Count; i++)
-                {
-                    listLines.Add(FFmpegService.BuildConcatListLine(selected[i].Path));
-                    if (i == 0 && inpointSeconds > 0)
-                        listLines.Add($"inpoint {inpointSeconds.ToString(CultureInfo.InvariantCulture)}");
-                }
-                await File.WriteAllTextAsync(concatPath, string.Join("\n", listLines) + "\n");
-
                 // Playable content the window actually contributes, for the progress estimate and
                 // for deriving the per-junction padding used by the bookmark resolver.
                 TimeSpan contentSpan = TimeSpan.Zero;
@@ -492,54 +467,39 @@ namespace Segra.Backend.Recorder
                         contentSpan += to - from;
                 }
 
+                // Concat demuxer options apply to the file line they follow, so the inpoint goes
+                // after the first file, not before it.
+                var listLines = new List<string>();
+                for (int i = 0; i < selected.Count; i++)
+                {
+                    listLines.Add(FFmpegService.BuildConcatListLine(selected[i].Path));
+                    if (i == 0 && inpointSeconds > 0)
+                        listLines.Add($"inpoint {inpointSeconds.ToString(CultureInfo.InvariantCulture)}");
+                }
+
                 string? codec = await FFmpegService.DetectVideoCodec(selected[0].Path);
                 string tagArgs = codec == "hevc" ? " -tag:v hvc1" : "";
-                // -map -0:d drops the mkv segments' chapter data track (a bin_data stream the
-                // muxer writes into every segment) and -map_chapters -1 the container chapters;
-                // same as ClipService's segment merge. Bookmarks come from the finalize step.
-                string arguments = $"-y -f concat -safe 0 -i \"{concatPath}\" -map 0 -map -0:d -map_chapters -1 -c copy{tagArgs} \"{stagedPath}\"";
 
-                try
+                // ffmpeg assembles into the segment folder and the finished file is published into the
+                // library only after that succeeded. DiskBufferSaveAssembly owns the staging name, the
+                // publish and the partials either leaves behind, and reports every failure instead of
+                // throwing: this save runs on a task nobody is watching, and the user has already been
+                // told it started.
+                var assembly = await DiskBufferSaveAssembly.RunAsync(
+                    _segmentFolder,
+                    PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Buffers, _gameFolderName),
+                    $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4",
+                    listLines,
+                    tagArgs,
+                    contentSpan.TotalSeconds);
+
+                if (!assembly.Succeeded || assembly.OutputPath == null)
                 {
-                    await FFmpegService.RunWithProgress(
-                        Interlocked.Increment(ref _ffmpegProcessSeq),
-                        arguments,
-                        contentSpan.TotalSeconds,
-                        _ => { });
-                }
-                catch (FFmpegException ex)
-                {
-                    Log.Error($"Disk buffer replay concat failed (exit {ex.ExitCode}): {FFmpegErrors.Summarize(ex)}");
-                    await MessageService.ShowModal("Replay Save Failed", FFmpegErrors.DescribeForUser(ex), "error");
-                    return null;
-                }
-                catch (Exception ex)
-                {
-                    Log.Error(ex, "Disk buffer replay concat failed unexpectedly");
-                    await MessageService.ShowModal("Replay Save Failed", "The replay could not be assembled from the disk buffer segments. Check the log for details.", "error");
+                    await MessageService.ShowModal("Replay Save Failed", assembly.UserMessage ?? "The replay could not be saved. Check the log for details.", "error");
                     return null;
                 }
 
-                if (!File.Exists(stagedPath))
-                {
-                    Log.Error($"Disk buffer replay concat reported success but produced no file: {stagedPath}");
-                    return null;
-                }
-
-                // Only a finished concat is moved into the library folders. A save interrupted before
-                // this point leaves its output in the segment folder, where the library never looks
-                // and the startup purge deletes it.
-                try
-                {
-                    File.Move(stagedPath, outputPath);
-                }
-                catch (Exception ex)
-                {
-                    Log.Error(ex, $"Failed to move the assembled replay into the library: {outputPath}");
-                    await MessageService.ShowModal("Replay Save Failed", "The replay was assembled but could not be added to the library. Check the log for details.", "error");
-                    return null;
-                }
-
+                outputPath = assembly.OutputPath;
                 TimeSpan outputDuration = await FFmpegService.GetVideoDuration(outputPath);
                 Log.Information($"Disk buffer replay saved to: {outputPath} ({selected.Count} segments, {outputDuration.TotalSeconds:F1} s)");
 
@@ -556,10 +516,6 @@ namespace Segra.Backend.Recorder
                         _lastSaveEnd = requestedAt;
                 }
                 ledger.Unpin(selected);
-                if (concatPath != null)
-                    DeleteQuietly(concatPath);
-                if (!succeeded)
-                    DeleteQuietly(stagedPath);
                 ledger.ReleaseSaveLease();
                 _saveLock.Release();
             }
