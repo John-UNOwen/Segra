@@ -1,7 +1,6 @@
 using Serilog;
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
@@ -130,10 +129,11 @@ namespace Segra.Backend.Recorder
             "The replay was assembled but could not be added to the library. Check the log for details.";
 
         /// <summary>
-        /// Rename the staged file into its library name, and only fall back to a copy when that rename is
-        /// refused. The copy lands under the interrupted-save marker in the destination folder and is
-        /// renamed into place once it is complete, so a partial never carries a library name; the staged
-        /// original is kept until the destination exists.
+        /// Publish the staged file under its library name: a rename when staging and library share a
+        /// volume, a copy through the interrupted-save marker otherwise or when the rename is refused. The
+        /// copy lands in the destination folder under the marker and is renamed into place once it is
+        /// complete, so a partial never carries a library name; the staged original is kept until the
+        /// destination exists.
         /// </summary>
         private static Outcome Publish(ISteps io, string stagedPath, string outputPath)
         {

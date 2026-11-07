@@ -39,7 +39,6 @@ namespace Segra.Backend.Recorder
         private static SignalConnection? _fileChangedConnection;
 
         private static string _segmentFolder = "";
-        private static string _bufferRoot = "";
         private static string _gameFolderName = "";
         private static DateTime? _lastSaveEnd;
         private static TaskCompletionSource<string>? _splitSignaled;
@@ -123,6 +122,7 @@ namespace Segra.Backend.Recorder
         /// </summary>
         public static bool Start(RecordingOutput output, string gameFolderName, int durationSec)
         {
+            string bufferRoot;
             lock (_lock)
             {
                 if (_output != null)
@@ -138,8 +138,8 @@ namespace Segra.Backend.Recorder
                 _ledger = new DiskBufferLedger(durationSec);
                 _lastSaveEnd = null;
 
-                _bufferRoot = ResolveRecordingRoot();
-                _segmentFolder = PathUtils.Combine(_bufferRoot, gameFolderName);
+                bufferRoot = ResolveRecordingRoot();
+                _segmentFolder = PathUtils.Combine(bufferRoot, gameFolderName);
                 try
                 {
                     Directory.CreateDirectory(_segmentFolder);
@@ -174,11 +174,6 @@ namespace Segra.Backend.Recorder
                 }
             }
 
-            // Remember which root this recording writes into before its first segment exists: the settings
-            // screen can move DiskBufferFolder at any time, and this record is the only thing that later
-            // tells the purge and the storage accounting that an older folder holds rolling footage.
-            RecordBufferRoot(_bufferRoot);
-
             bool started;
             try
             {
@@ -196,6 +191,12 @@ namespace Segra.Backend.Recorder
                 CleanupOutput(output);
                 return false;
             }
+
+            // Remember which root this recording writes into before its first segment is pruned away: the
+            // settings screen can move DiskBufferFolder at any time, and this record is the only thing that
+            // later tells the purge and the storage accounting that an older folder holds rolling footage.
+            // Outside the lock: saving settings is file IO, and the segment boundary handler waits on it.
+            RecordBufferRoot(bufferRoot);
 
             lock (_lock)
             {
