@@ -82,6 +82,7 @@ namespace Segra.Backend.Core.Models
         private bool _alwaysOnReplayBuffer = false;
         private int _diskBufferDuration = 1800;
         private string _diskBufferFolder = string.Empty;
+        private List<string> _diskBufferRecordedFolders = new List<string>();
         private bool _diskBufferSaveSinceLastSave = true;
         private List<Hotkey> _hotkeys;
         private List<GameSetting> _games = new List<GameSetting>();
@@ -661,6 +662,29 @@ namespace Segra.Backend.Core.Models
         {
             get => _diskBufferFolder;
             set => _diskBufferFolder = Shared.PathUtils.Normalize(value ?? string.Empty);
+        }
+
+        // Buffer folders this app has recorded into, canonicalized the way the recorder resolves one. The
+        // live DiskBufferFolder is the only folder a new recording uses; the rest are remembered because
+        // the footage they hold is still on disk, and only knowing it was a buffer folder keeps it out of
+        // the library, out of the storage usage figure and out of the storage-limit cleanup.
+        [JsonPropertyName("diskBufferRecordedFolders")]
+        public List<string> DiskBufferRecordedFolders
+        {
+            get => _diskBufferRecordedFolders;
+            set
+            {
+                var folders = new List<string>();
+                foreach (string folder in value ?? new List<string>())
+                {
+                    if (string.IsNullOrWhiteSpace(folder))
+                        continue;
+                    string normalized = Shared.PathUtils.Normalize(folder);
+                    if (!folders.Contains(normalized, StringComparer.OrdinalIgnoreCase))
+                        folders.Add(normalized);
+                }
+                _diskBufferRecordedFolders = folders;
+            }
         }
 
         // A disk buffer save covers footage since the previous save, mirroring the RAM buffer

@@ -11,6 +11,7 @@ namespace Segra.Tests.Configuration
     /// buffer folder arriving through a file (or an older file, or a hand-seeded one) has to be
     /// caught by the load itself, not only by the settings screen.
     /// </summary>
+    [Collection("Settings")]
     public class DiskBufferFolderLoadTests : IDisposable
     {
         private readonly string _bufferFolderBefore = Settings.Instance.DiskBufferFolder;

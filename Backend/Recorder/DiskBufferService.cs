@@ -3,6 +3,7 @@ using ObsKit.NET.Outputs;
 using ObsKit.NET.Signals;
 using ObsKit.NET.Native.Types;
 using Segra.Backend.App;
+using Segra.Backend.Core;
 using Segra.Backend.Media;
 using Segra.Backend.Shared;
 using Segra.Backend.Core.Models;
@@ -38,6 +39,7 @@ namespace Segra.Backend.Recorder
         private static SignalConnection? _fileChangedConnection;
 
         private static string _segmentFolder = "";
+        private static string _bufferRoot = "";
         private static string _gameFolderName = "";
         private static DateTime? _lastSaveEnd;
         private static TaskCompletionSource<string>? _splitSignaled;
@@ -77,6 +79,43 @@ namespace Segra.Backend.Recorder
         public static string ResolvedRoot() => FolderNames.GetDiskBufferRoot();
 
         /// <summary>
+        /// The root this recording writes into, put through the same rules that decide which folders the
+        /// buffer may be pointed at all, so the folder the recorder uses and the folder it remembers are
+        /// one path.
+        /// </summary>
+        private static string ResolveRecordingRoot()
+        {
+            if (DiskBufferPathPolicy.TryResolve(Settings.Instance.DiskBufferFolder, Settings.Instance.ContentFolder, out string root, out _))
+                return root;
+
+            return ResolvedRoot();
+        }
+
+        /// <summary>
+        /// Adds this recording's buffer root to the settings list of roots the app has recorded into, and
+        /// saves it now: a hard kill is exactly the case where that folder has to be findable again, and a
+        /// folder nobody remembers recording into is counted as content and cleaned up as content.
+        /// </summary>
+        private static void RecordBufferRoot(string root)
+        {
+            try
+            {
+                var recorded = new List<string>(Settings.Instance.DiskBufferRecordedFolders);
+                if (recorded.Contains(root, StringComparer.OrdinalIgnoreCase))
+                    return;
+
+                recorded.Add(root);
+                Settings.Instance.DiskBufferRecordedFolders = recorded;
+                SettingsService.SaveSettings();
+                Log.Information($"Disk buffer recording will write into {root}");
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, $"Failed to record {root} as a disk buffer folder this app recorded into");
+            }
+        }
+
+        /// <summary>
         /// Takes over an OBSService-configured output: enables file splitting under the resolved
         /// root, subscribes file_changed (after SetFormat, which recreates the OBS output), starts
         /// recording and seeds the ledger with the first segment. Returns false when the start
@@ -96,7 +135,8 @@ namespace Segra.Backend.Recorder
                 _ledger = new DiskBufferLedger(durationSec);
                 _lastSaveEnd = null;
 
-                _segmentFolder = PathUtils.Combine(ResolvedRoot(), gameFolderName);
+                _bufferRoot = ResolveRecordingRoot();
+                _segmentFolder = PathUtils.Combine(_bufferRoot, gameFolderName);
                 try
                 {
                     Directory.CreateDirectory(_segmentFolder);
@@ -126,6 +166,11 @@ namespace Segra.Backend.Recorder
                     return false;
                 }
             }
+
+            // Remember which root this recording writes into before its first segment exists: the settings
+            // screen can move DiskBufferFolder at any time, and this record is the only thing that later
+            // tells the purge and the storage accounting that an older folder holds rolling footage.
+            RecordBufferRoot(_bufferRoot);
 
             bool started;
             try
@@ -545,39 +590,50 @@ namespace Segra.Backend.Recorder
 
         /// <summary>
         /// Startup cleanup: segments left by a crash and staged saves a killed assembly left behind are
-        /// stale by definition. Removes what the two markers identify under the resolved root (a missing
-        /// folder is fine) and reports what it reclaimed - and what it could not delete, which stands
-        /// until the next start rather than being counted as gone.
+        /// stale by definition. Sweeps the live buffer root and every root a recording actually wrote
+        /// into while it still exists - the folder a recording uses is fixed at start, and the setting can
+        /// move at any time - and reports what it reclaimed, including what it could not delete and will
+        /// try again next start. A folder that is gone is skipped quietly.
         /// </summary>
         public static DiskBufferPurgeReport PurgeAll()
         {
-            string root = ResolvedRoot();
             string contentFolder = PathUtils.Normalize(Settings.Instance.ContentFolder);
+            int deleted = 0;
+            int undeleted = 0;
+            long freedBytes = 0;
 
-            if (string.IsNullOrWhiteSpace(root) || root.TrimEnd('/', '\\').Length <= 2)
+            foreach (string root in FolderNames.GetDiskBufferRoots())
             {
-                Log.Warning($"Refusing to purge disk buffer root '{root}'");
-                return new DiskBufferPurgeReport(0, 0, 0);
-            }
-            if (string.Equals(root, contentFolder, StringComparison.OrdinalIgnoreCase) ||
-                contentFolder.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
-            {
-                // The root must never be or contain the content folders themselves.
-                Log.Warning($"Refusing to purge disk buffer root '{root}': it is or contains the content folder");
-                return new DiskBufferPurgeReport(0, 0, 0);
+                if (root.TrimEnd('/', '\\').Length <= 2)
+                {
+                    Log.Warning($"Refusing to purge disk buffer root '{root}'");
+                    continue;
+                }
+                if (string.Equals(root, contentFolder, StringComparison.OrdinalIgnoreCase) ||
+                    contentFolder.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
+                {
+                    // A root must never be or contain the content folders themselves.
+                    Log.Warning($"Refusing to purge disk buffer root '{root}': it is or contains the content folder");
+                    continue;
+                }
+                if (!Directory.Exists(root))
+                    continue;
+
+                try
+                {
+                    DiskBufferPurgeReport one = PurgeFolder(root);
+                    deleted += one.DeletedFiles;
+                    undeleted += one.UndeletedFiles;
+                    freedBytes += one.ReclaimedBytes;
+                    Log.Information($"Disk buffer startup purge completed for {root}");
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, $"Disk buffer startup purge failed for {root}");
+                }
             }
 
-            try
-            {
-                DiskBufferPurgeReport report = PurgeFolder(root);
-                Log.Information($"Disk buffer startup purge completed for {root}");
-                return report;
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, $"Disk buffer startup purge failed for {root}");
-                return new DiskBufferPurgeReport(0, 0, 0);
-            }
+            return new DiskBufferPurgeReport(deleted, freedBytes, undeleted);
         }
 
         // Two markers say a file under the buffer root is ours to delete: the seg_<CCYY-MM-DD>_<hh-mm-ss>.mkv

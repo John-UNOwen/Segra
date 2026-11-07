@@ -10,6 +10,7 @@ namespace Segra.Tests.Configuration
     /// The startup purge deletes everything under the buffer folder. A folder the user picked is
     /// only allowed to hold segments: anything else it contains has to survive.
     /// </summary>
+    [Collection("Settings")]
     public class DiskBufferPurgeTests : IDisposable
     {
         private readonly string _contentBefore = Settings.Instance.ContentFolder;

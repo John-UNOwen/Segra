@@ -13,6 +13,7 @@ namespace Segra.Tests.Configuration
     /// itself will ever remove it. A kill during a cross-volume move put one of these next to real
     /// footage, and a genuine replay and its sidecars have to survive the sweep that follows.
     /// </summary>
+    [Collection("Settings")]
     public class DiskBufferLibraryCleanupTests : IDisposable
     {
         private readonly string _contentBefore = Settings.Instance.ContentFolder;

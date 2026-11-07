@@ -54,27 +54,56 @@ namespace Segra.Backend.Shared
         }
 
         /// <summary>
-        /// True when a path is the disk buffer root or lives under it. Compared on normalized path
-        /// components against the resolved root, not against the folder name, so a buffer the user
-        /// moved somewhere else is still recognized.
+        /// Every folder the disk buffer has been written into: the root the settings point at now, plus
+        /// the roots recordings actually wrote into before that setting moved. A recording fixes its folder
+        /// at start while every consumer resolves the setting live, so without the recorded ones the
+        /// leftovers of an older folder read as content. Canonicalized, live root first, no duplicates.
+        /// </summary>
+        public static List<string> GetDiskBufferRoots()
+        {
+            var roots = new List<string>();
+            AddBufferRoot(roots, GetDiskBufferRoot());
+            foreach (string recorded in Settings.Instance.DiskBufferRecordedFolders ?? new List<string>())
+                AddBufferRoot(roots, recorded);
+            return roots;
+        }
+
+        private static void AddBufferRoot(List<string> roots, string? candidate)
+        {
+            string root = NormalizeBufferRoot(candidate);
+            if (root.Length == 0)
+                return;
+            if (!roots.Contains(root, StringComparer.OrdinalIgnoreCase))
+                roots.Add(root);
+        }
+
+        // Path components are compared normalized: forward slashes, no trailing separator.
+        private static string NormalizeBufferRoot(string? path) =>
+            (path ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+
+        /// <summary>
+        /// True when a path is a disk buffer root or lives under one - the live root or any root a
+        /// recording wrote into. Compared on normalized path components, not against the folder name, so a
+        /// buffer the user moved somewhere else is still recognized.
         /// </summary>
         public static bool IsDiskBufferPath(string path)
         {
-            string root = GetDiskBufferRoot();
-            if (string.IsNullOrEmpty(root) || string.IsNullOrEmpty(path))
-                return false;
-
-            string candidate = path.Replace("\\", "/").TrimEnd('/');
-            string bufferRoot = root.Replace("\\", "/").TrimEnd('/');
-            if (candidate.Length == 0 || bufferRoot.Length == 0)
+            string candidate = NormalizeBufferRoot(path);
+            if (candidate.Length == 0)
                 return false;
 
             var comparison = OperatingSystem.IsWindows()
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal;
 
-            return string.Equals(candidate, bufferRoot, comparison) ||
-                candidate.StartsWith(bufferRoot + "/", comparison);
+            foreach (string bufferRoot in GetDiskBufferRoots())
+            {
+                if (string.Equals(candidate, bufferRoot, comparison) ||
+                    candidate.StartsWith(bufferRoot + "/", comparison))
+                    return true;
+            }
+
+            return false;
         }
 
         /// <summary>
