@@ -677,27 +677,10 @@ namespace Segra.Backend.Core
             {
                 Log.Information($"DiskBufferFolder changed from '{settings.DiskBufferFolder}' to '{updatedSettings.DiskBufferFolder}'");
 
-                // An empty folder is valid: it means the buffer folder is derived from the content folder at use time
-                if (string.IsNullOrEmpty(updatedSettings.DiskBufferFolder))
-                {
-                    settings.DiskBufferFolder = updatedSettings.DiskBufferFolder;
+                if (TryApplyDiskBufferFolderChange(settings, updatedSettings.DiskBufferFolder, "sent by the settings screen"))
                     hasChanges = true;
-                }
-                else if (!IsAbsolutePath(updatedSettings.DiskBufferFolder))
-                {
-                    Log.Warning($"Ignoring disk buffer folder '{updatedSettings.DiskBufferFolder}': not an absolute path");
-                    rejectedFolder = true;
-                }
-                else if (IsInsideContentFolders(updatedSettings.DiskBufferFolder))
-                {
-                    Log.Warning($"Ignoring disk buffer folder '{updatedSettings.DiskBufferFolder}': inside a content folder");
-                    rejectedFolder = true;
-                }
                 else
-                {
-                    settings.DiskBufferFolder = updatedSettings.DiskBufferFolder;
-                    hasChanges = true;
-                }
+                    rejectedFolder = true;
             }
 
             if (settings.DiskBufferSaveSinceLastSave != updatedSettings.DiskBufferSaveSinceLastSave)
@@ -995,6 +978,11 @@ namespace Segra.Backend.Core
                 hasChanges = true;
             }
 
+            // A content folder can move inside the folder the buffer is recording into, which makes the
+            // stored buffer folder unsafe without the buffer folder itself ever being changed.
+            if (SanitizeDiskBufferFolder(settings, "settings updated"))
+                hasChanges = true;
+
             // Only save settings and send to frontend if changes were actually made
             if (hasChanges)
             {
@@ -1020,50 +1008,54 @@ namespace Segra.Backend.Core
         /// that cannot be recorded into safely is dropped back to the derived default. An empty
         /// setting stays empty, because empty means "derive it from the content folder at use time".
         /// </summary>
-        internal static void SanitizeDiskBufferFolder(Settings settings, string source)
+        internal static bool SanitizeDiskBufferFolder(Settings settings, string source)
         {
             string configured = settings.DiskBufferFolder;
             if (string.IsNullOrWhiteSpace(configured))
-                return;
+                return false;
 
             if (DiskBufferPathPolicy.TryResolve(configured, settings.ContentFolder, out string root, out string reason))
             {
                 if (root != configured)
+                {
                     settings.DiskBufferFolder = root;
-                return;
+                    return true;
+                }
+
+                return false;
             }
 
             Log.Warning($"Ignoring disk buffer folder '{configured}' ({source}): {reason}");
             settings.DiskBufferFolder = string.Empty;
+            return true;
+        }
+
+        /// <summary>
+        /// A buffer folder the settings screen asks for, held to the same rules a loaded settings file
+        /// is held to. An accepted value is stored canonical so what is saved, what OBS is given and
+        /// what the purge walks are one path. A refused value leaves the previous one in place. Empty
+        /// is a valid request: it means derive the folder from the content folder at use time.
+        /// </summary>
+        internal static bool TryApplyDiskBufferFolderChange(Settings settings, string requested, string source)
+        {
+            if (string.IsNullOrWhiteSpace(requested))
+            {
+                settings.DiskBufferFolder = requested ?? string.Empty;
+                return true;
+            }
+
+            if (!DiskBufferPathPolicy.TryResolve(requested, settings.ContentFolder, out string root, out string reason))
+            {
+                Log.Warning($"Ignoring disk buffer folder '{requested}' ({source}): {reason}");
+                return false;
+            }
+
+            settings.DiskBufferFolder = root;
+            return true;
         }
 
         private static bool IsAbsolutePath(string? path) =>
             !string.IsNullOrWhiteSpace(path) && Path.IsPathFullyQualified(path);
-
-        // True when a folder is the same as, under, or a parent of one of the content-type folders under
-        // the content folder. Segments living there would be listed by the library scanner and counted
-        // or deleted by the storage-limit cleanup.
-        private static bool IsInsideContentFolders(string folder)
-        {
-            static string Canonical(string path) =>
-                PathUtils.Normalize(Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)));
-
-            string candidate = Canonical(folder);
-            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-
-            foreach (var contentFolderName in new[] { FolderNames.Sessions, FolderNames.Buffers, FolderNames.Clips, FolderNames.Highlights })
-            {
-                string contentPath = Canonical(PathUtils.Combine(Settings.Instance.ContentFolder, contentFolderName));
-                if (string.Equals(candidate, contentPath, comparison) ||
-                    candidate.StartsWith(contentPath + Path.AltDirectorySeparatorChar, comparison) ||
-                    contentPath.StartsWith(candidate + Path.AltDirectorySeparatorChar, comparison))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
 
         private static bool TryCreateDirectory(string path)
         {
