@@ -55,6 +55,28 @@ namespace Segra.Tests.Recorder
             Assert.False(File.Exists(steps.ConcatListPath));
         }
 
+        [Fact]
+        public async Task TheConcatNamesItsFormatBecauseTheStagedNameIsNotAContainer()
+        {
+            // The staged file is named with the interrupted-save marker on purpose, so the purge can tell a
+            // discarded save from footage. ffmpeg picks a muxer from the output extension and .segrereplay is
+            // not one it knows, so the container has to be named in the arguments. Without it every disk
+            // save dies at the output-open step before a single byte is written.
+            var steps = new RenamingSteps();
+
+            var outcome = await DiskBufferSaveAssembly.RunAsync(
+                _staging, _library, FileName, ConcatLines(), "", 61.2, steps);
+
+            Assert.True(outcome.Succeeded);
+
+            string staged = PathUtils.Normalize(Path.Combine(_staging, FileName + DiskBufferSaveAssembly.InterruptedSaveMarker));
+            Assert.EndsWith(DiskBufferSaveAssembly.InterruptedSaveMarker, staged);
+
+            string arguments = steps.Arguments ?? "";
+            Assert.False(string.IsNullOrEmpty(arguments));
+            Assert.EndsWith($"-f mp4 \"{staged}\"", arguments);
+        }
+
         private static List<string> ConcatLines() => new() { "file 'C:/buffer/seg_2026-11-04_19-45-26.mkv'" };
 
         [Fact]
@@ -233,10 +255,12 @@ namespace Segra.Tests.Recorder
             public string? ConcatListPath { get; private set; }
             public bool ConcatListExisted { get; private set; }
             public string? StagedPath { get; private set; }
+            public string? Arguments { get; private set; }
 
             public Task RunConcatAsync(string ffmpegArguments, string stagedPath, double expectedContentSeconds)
             {
                 StagedPath = stagedPath;
+                Arguments = ffmpegArguments;
                 ConcatListPath = ExtractQuotedPath(ffmpegArguments, "-i");
                 ConcatListExisted = ConcatListPath != "" && File.Exists(ConcatListPath);
                 File.WriteAllText(stagedPath, "assembled replay");

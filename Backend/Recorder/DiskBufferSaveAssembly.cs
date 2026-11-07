@@ -194,8 +194,11 @@ namespace Segra.Backend.Recorder
         // -map -0:d drops the mkv segments' chapter data track (a bin_data stream the muxer writes into
         // every segment) and -map_chapters -1 the container chapters; same as ClipService's segment merge.
         // Bookmarks come from the finalize step, not from the container.
+        // -f mp4 names the container because the output is staged under the interrupted-save marker: ffmpeg
+        // chooses a muxer from the file extension, and past ".segrereplay" there is none it recognises, so
+        // without this the save fails at the output-open step before a byte is written.
         private static string BuildArguments(string concatPath, string stagedPath, string ffmpegExtraArgs) =>
-            $"-y -f concat -safe 0 -i \"{concatPath}\" -map 0 -map -0:d -map_chapters -1 -c copy{ffmpegExtraArgs} \"{stagedPath}\"";
+            $"-y -f concat -safe 0 -i \"{concatPath}\" -map 0 -map -0:d -map_chapters -1 -c copy{ffmpegExtraArgs} -f mp4 \"{stagedPath}\"";
 
         /// <summary>
         /// Startup sweep of the library folders for saves that never finished publishing: an interrupted
