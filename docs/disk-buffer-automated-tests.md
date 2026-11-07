@@ -215,3 +215,55 @@ repo.
   fix and was not exercised.
 - `docs/disk-buffer-phase1-findings.md` records that stream-copy concat drops the muxer's CBR padding;
   these runs show the drop for QSV H.264 and no drop for QSV HEVC or for the RAM buffer path.
+
+## Re-runs after the defect pass (2026-11-07)
+
+A checkup over the branch produced 17 defects. All were addressed test-first in
+`Backend/Tests/Segra.Tests` (53 tests now), except two that need an OBS output factory and the frontend
+to reach at all: releasing the output when the segment folder cannot be created, and the order the save
+sound follows. Four phases were then re-run against the Debug build on this machine, same harness and
+layout as above - a content folder under `%LOCALAPPDATA%\Temp\segra-harness\scratch`, disk buffer mode,
+300 s window, CBR 8 Mbps, 720p60, QSV H.264, `diskBufferFolder` empty so the folder is derived. Every
+phase captured `settings.json` before launching and restored it byte-identically afterwards.
+
+**Settings update path.** A websocket `UpdateSettings` carrying `<contentFolder>/Replay Buffers` was
+refused - `Ignoring disk buffer folder '...' (sent by the settings screen): '...' sits inside the
+'Replay Buffers' library folder` - and the stored value stayed empty. The same call carrying
+`<scratch>/buf/../buf2` was stored as `<scratch>/buf2`.
+
+**Clean save, 19 of 19 assertions.** 31 segments, 300,544,585 B at peak, every name matching
+`seg_<date>_<time>.mkv`, 30 boundary lines 10 s apart. The save staged
+`2026-11-07_05-09-31.mp4.segrereplay` inside the segment folder: first seen 851 ms after the hotkey on
+poll 4 of a 120 ms poll, last measured at 53,477,424 B while still staged. The replay buffers folder
+stayed empty until 1,587 ms and then held exactly one file, `2026-11-07_05-09-31.mp4` at 60,375,463 B,
+after `Published disk buffer replay to ... (renamed)`. Probe 301.76 s against a 300 s window, decode
+scan 18,060 frames with no errors, no `.segrereplay` anywhere, stop purge 33 files and 308.8 MB.
+
+**Killed during the save, 17 of 17.** The concat process was found 761 ms after the hotkey and Segra was
+hard-killed 1.1 ms later, with `obs-ffmpeg-mux` stopped by its own proved pid. A
+`2026-11-07_05-15-10.mp4.segrereplay` partial of 37,224,496 B was left in the buffer folder and nothing
+was placed under any library folder: no `Published`, no `saved to`, no orphan or recovery line. The next
+start logged `Purged 33 disk buffer file(s), 328.1 MB reclaimed`, matching the folder scan file for file
+and byte for byte, and no marker-suffixed file survived.
+
+**Abandoned buffer folder, 18 of 18.** With `diskBufferFolder` pointed at a scratch folder a recording
+wrote only there, and that root was saved into `diskBufferRecordedFolders`. After the setting was
+cleared, the startup purge still walked the old root: it removed `seg_2099-01-01_00-00-00.mkv` and both
+`*.mp4.segrereplay` fixtures - one in the `Manual Recording` subfolder, one at the root - claimed 3
+files and 4,194,304 B, and left `notes.txt` alone through a second restart and a second recording.
+
+**A defect only a live run could catch.** The staged name is what tells the purge that a leftover is a
+discarded save, and ffmpeg picks its muxer from the output extension: past `.segrereplay` there is none
+it knows. At `8238c29` every disk save died at the output-open step, exit `-22`, `Unable to choose an
+output format for '...mp4.segrereplay'`, before writing a byte - with 52 unit tests green throughout,
+because the assembly tests inject the concat step and never hand the real argument string to a real
+ffmpeg. Naming the container (`-f mp4`) fixes it. The diagnosis run concatenated the same six real
+segments three ways: the app's own arguments produced nothing, a plain `.mp4` produced 14,159,216 B, and
+the marker name with `-f mp4` produced 14,159,216 B with the same SHA-256
+(8EF2D7FAB3BE424AD44C60ED40A3FA1ABB1E6E2CAFCB6E6F1498BF36B299ED86). The regression is now covered by a
+test on the arguments handed to the concat step.
+
+Two bullets under **Not verified** are closed by these runs: the startup purge of a folder recording
+moved out of, and a real interrupted save leaving a partial that the next start removes. Staging across
+volumes is still only exercised through the injected steps - this machine has one volume - and the
+in-recording low-space stop has still never been seen happen.
