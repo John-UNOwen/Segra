@@ -46,8 +46,8 @@ namespace Segra.Tests.Recorder
             Assert.Equal("assembled replay", File.ReadAllText(Path.Combine(_library, FileName)));
 
             // Nothing left in the buffer folder, and nothing under an interrupted-save marker either.
-            Assert.Empty(Directory.GetFiles(_staging));
-            Assert.Empty(Directory.GetFiles(_library, "*" + DiskBufferSaveAssembly.InterruptedSaveMarker));
+            Assert.Empty(FilesUnder(_staging));
+            Assert.Empty(FilesUnder(_library, "*" + DiskBufferSaveAssembly.InterruptedSaveMarker));
 
             // The concat list ffmpeg read is written by the assembly and gone with the save.
             Assert.NotNull(steps.ConcatListPath);
@@ -56,6 +56,51 @@ namespace Segra.Tests.Recorder
         }
 
         private static List<string> ConcatLines() => new() { "file 'C:/buffer/seg_2026-11-04_19-45-26.mkv'" };
+
+        [Fact]
+        public async Task ARenameTheDestinationRefusesFallsBackToAMarkerCopy()
+        {
+            // The rename into the library is a copy followed by a delete whenever the buffer folder is on
+            // another volume, and even on one volume the destination can refuse the file: an antivirus
+            // scan or the indexer opening what ffmpeg just closed. The fallback copies into the same
+            // folder under the interrupted-save marker and renames that - a rename inside one folder -
+            // into the final name.
+            var steps = new RenameRefusedOnce();
+
+            var outcome = await DiskBufferSaveAssembly.RunAsync(
+                _staging, _library, FileName, ConcatLines(), "", 61.2, steps);
+
+            Assert.True(outcome.Succeeded);
+            Assert.Equal("assembled replay", File.ReadAllText(Path.Combine(_library, FileName)));
+
+            // One library file, under its real name, and no marker partial left behind anywhere.
+            Assert.Single(FilesUnder(_library));
+            Assert.Empty(FilesUnder(_library, "*" + DiskBufferSaveAssembly.InterruptedSaveMarker));
+            Assert.Empty(FilesUnder(_staging));
+        }
+
+        [Fact]
+        public async Task ACopyThatAlsoFailsLeavesTheStagedReplayAlone()
+        {
+            // When the copy cannot finish either, the staged file is the only complete copy of that
+            // footage left: the recording's segments are purged as soon as the stop finishes. Nothing may
+            // be created under a library name, and the staged original survives.
+            var steps = new RenameAndCopyRefused();
+
+            var outcome = await DiskBufferSaveAssembly.RunAsync(
+                _staging, _library, FileName, ConcatLines(), "", 61.2, steps);
+
+            Assert.False(outcome.Succeeded);
+            Assert.Empty(FilesUnder(_library));
+
+            string[] staged = FilesUnder(_staging);
+            Assert.Single(staged);
+            Assert.Equal("assembled replay", File.ReadAllText(staged[0]));
+        }
+
+        // A folder that never got created holds nothing; a failed publish must not create one either.
+        private static string[] FilesUnder(string folder, string pattern = "*") =>
+            Directory.Exists(folder) ? Directory.GetFiles(folder, pattern) : Array.Empty<string>();
 
         /// <summary>The normal case: the staged file is renamed into its library name.</summary>
         private sealed class RenamingSteps : DiskBufferSaveAssembly.ISteps
@@ -74,6 +119,46 @@ namespace Segra.Tests.Recorder
             public void MoveFile(string source, string destination) => File.Move(source, destination);
 
             public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
+        }
+
+        /// <summary>
+        /// The first rename - the one that would have to move the file between folders - is refused; the
+        /// rename inside the destination folder works.
+        /// </summary>
+        private sealed class RenameRefusedOnce : DiskBufferSaveAssembly.ISteps
+        {
+            private int _moves;
+
+            public Task RunConcatAsync(string ffmpegArguments, string stagedPath, double expectedContentSeconds)
+            {
+                File.WriteAllText(stagedPath, "assembled replay");
+                return Task.CompletedTask;
+            }
+
+            public void MoveFile(string source, string destination)
+            {
+                if (_moves++ == 0)
+                    throw new IOException("The process cannot access the file because it is being used by another process");
+                File.Move(source, destination);
+            }
+
+            public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
+        }
+
+        /// <summary>No publish path works: both the rename and the copy are refused.</summary>
+        private sealed class RenameAndCopyRefused : DiskBufferSaveAssembly.ISteps
+        {
+            public Task RunConcatAsync(string ffmpegArguments, string stagedPath, double expectedContentSeconds)
+            {
+                File.WriteAllText(stagedPath, "assembled replay");
+                return Task.CompletedTask;
+            }
+
+            public void MoveFile(string source, string destination) =>
+                throw new IOException("The process cannot access the file because it is being used by another process");
+
+            public void CopyFile(string source, string destination) =>
+                throw new IOException("There is not enough space on the disk");
         }
 
         private static string ExtractQuotedPath(string arguments, string option)

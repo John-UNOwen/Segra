@@ -47,7 +47,11 @@ namespace Segra.Backend.Recorder
             void CopyFile(string source, string destination);
         }
 
-        internal sealed record Outcome(bool Succeeded, string? OutputPath, string? Reason);
+        /// <summary>
+        /// Succeeded, and where the replay ended up; or why it did not work. StagedPreserved says the
+        /// staged file was left alone on purpose - it is the only complete copy of that footage.
+        /// </summary>
+        internal sealed record Outcome(bool Succeeded, string? OutputPath, string? Reason, bool StagedPreserved);
 
         /// <summary>
         /// Assembles the save and publishes it. outputFolder is created here, staged in stagingFolder,
@@ -76,16 +80,58 @@ namespace Segra.Backend.Recorder
                 await io.RunConcatAsync(BuildArguments(concatPath, stagedPath, ffmpegExtraArgs), stagedPath, expectedContentSeconds);
 
                 if (!File.Exists(stagedPath))
-                    return new Outcome(false, null, $"Disk buffer replay concat reported success but produced no file: {stagedPath}");
+                    return new Outcome(false, null, $"Disk buffer replay concat reported success but produced no file: {stagedPath}", false);
 
-                io.MoveFile(stagedPath, outputPath);
-                Log.Information($"Published disk buffer replay to {outputPath}");
-                return new Outcome(true, PathUtils.Normalize(outputPath), null);
+                return Publish(io, stagedPath, outputPath);
             }
             finally
             {
                 DeleteQuietly(concatPath);
             }
+        }
+
+        /// <summary>
+        /// Rename the staged file into its library name, and only fall back to a copy when that rename is
+        /// refused. The copy lands under the interrupted-save marker in the destination folder and is
+        /// renamed into place once it is complete, so a partial never carries a library name; the staged
+        /// original is kept until the destination exists.
+        /// </summary>
+        private static Outcome Publish(ISteps io, string stagedPath, string outputPath)
+        {
+            try
+            {
+                io.MoveFile(stagedPath, outputPath);
+                return Published(outputPath, "moved");
+            }
+            catch (Exception moveError)
+            {
+                Log.Warning(moveError, $"Could not move the assembled replay into the library: {outputPath}; copying instead");
+            }
+
+            string markerPath = outputPath + InterruptedSaveMarker;
+            try
+            {
+                io.CopyFile(stagedPath, markerPath);
+                io.MoveFile(markerPath, outputPath);
+                // The destination exists now, so the staged original is redundant.
+                DeleteQuietly(stagedPath);
+                return Published(outputPath, "copied");
+            }
+            catch (Exception copyError)
+            {
+                // Nothing half-written goes under a library name, and the staged file stays where it is:
+                // the buffer purge reaches it, and the recording's segments are gone as soon as the stop
+                // finishes, so this is the only complete copy of that footage.
+                Log.Error(copyError, $"Could not copy the assembled replay into the library: {outputPath}");
+                DeleteQuietly(markerPath);
+                return new Outcome(false, null, $"Could not publish the assembled replay to {outputPath}: {copyError.Message}", true);
+            }
+        }
+
+        private static Outcome Published(string outputPath, string how)
+        {
+            Log.Information($"Published disk buffer replay to {outputPath} ({how})");
+            return new Outcome(true, PathUtils.Normalize(outputPath), null, false);
         }
 
         // -map -0:d drops the mkv segments' chapter data track (a bin_data stream the muxer writes into
