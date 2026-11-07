@@ -544,12 +544,12 @@ namespace Segra.Backend.Recorder
         }
 
         /// <summary>
-        /// Startup cleanup: segments left by a crash are stale by definition. Removes the segment
-        /// files under the resolved root (a missing folder is fine) and logs what was reclaimed.
-        /// Only files OBS named as segments are touched, so a buffer folder the user pointed at
-        /// somewhere that also holds other work keeps that other work.
+        /// Startup cleanup: segments left by a crash and staged saves a killed assembly left behind are
+        /// stale by definition. Removes what the two markers identify under the resolved root (a missing
+        /// folder is fine) and reports what it reclaimed - and what it could not delete, which stands
+        /// until the next start rather than being counted as gone.
         /// </summary>
-        public static void PurgeAll()
+        public static DiskBufferPurgeReport PurgeAll()
         {
             string root = ResolvedRoot();
             string contentFolder = PathUtils.Normalize(Settings.Instance.ContentFolder);
@@ -557,43 +557,48 @@ namespace Segra.Backend.Recorder
             if (string.IsNullOrWhiteSpace(root) || root.TrimEnd('/', '\\').Length <= 2)
             {
                 Log.Warning($"Refusing to purge disk buffer root '{root}'");
-                return;
+                return new DiskBufferPurgeReport(0, 0, 0);
             }
             if (string.Equals(root, contentFolder, StringComparison.OrdinalIgnoreCase) ||
                 contentFolder.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase))
             {
                 // The root must never be or contain the content folders themselves.
                 Log.Warning($"Refusing to purge disk buffer root '{root}': it is or contains the content folder");
-                return;
+                return new DiskBufferPurgeReport(0, 0, 0);
             }
 
             try
             {
-                PurgeFolder(root);
+                DiskBufferPurgeReport report = PurgeFolder(root);
                 Log.Information($"Disk buffer startup purge completed for {root}");
+                return report;
             }
             catch (Exception ex)
             {
                 Log.Warning(ex, $"Disk buffer startup purge failed for {root}");
+                return new DiskBufferPurgeReport(0, 0, 0);
             }
         }
 
-        // OBS names segments seg_<CCYY-MM-DD>_<hh-mm-ss>.mkv (the format passed to WithFileSplitting).
-        // This is the marker that says a file under the buffer root is ours to delete.
-        private static bool IsSegmentFileName(string fileName) =>
-            fileName.StartsWith("seg_", StringComparison.OrdinalIgnoreCase) &&
-            fileName.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+        // Two markers say a file under the buffer root is ours to delete: the seg_<CCYY-MM-DD>_<hh-mm-ss>.mkv
+        // name OBS was given for the segments, and the interrupted-save marker a staged replay is assembled
+        // under. Anything else the folder happens to hold is not ours.
+        private static bool IsPurgeableFileName(string fileName) =>
+            (fileName.StartsWith("seg_", StringComparison.OrdinalIgnoreCase) &&
+             fileName.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase))
+            || fileName.EndsWith(DiskBufferSaveAssembly.InterruptedSaveMarker, StringComparison.OrdinalIgnoreCase);
 
-        private static void PurgeFolder(string folder)
+        private static DiskBufferPurgeReport PurgeFolder(string folder)
         {
             if (!Directory.Exists(folder))
-                return;
+                return new DiskBufferPurgeReport(0, 0, 0);
 
             int deleted = 0;
+            int undeleted = 0;
             long freedBytes = 0;
             foreach (string file in Directory.GetFiles(folder, "*", SearchOption.AllDirectories))
             {
-                if (!IsSegmentFileName(Path.GetFileName(file)))
+                if (!IsPurgeableFileName(Path.GetFileName(file)))
                     continue;
 
                 try
@@ -605,6 +610,8 @@ namespace Segra.Backend.Recorder
                 }
                 catch (Exception ex)
                 {
+                    // Still on disk, so it is still somebody's problem: counted, not forgotten.
+                    undeleted++;
                     Log.Warning(ex, $"Failed to delete disk buffer file {file}");
                 }
             }
@@ -620,7 +627,14 @@ namespace Segra.Backend.Recorder
                 catch { /* leave for the next purge */ }
             }
 
-            Log.Information($"Purged {deleted} disk buffer file(s), {freedBytes / (1024.0 * 1024.0):F1} MB reclaimed from {folder}");
+            Log.Information($"Purged {deleted} disk buffer file(s), {freedBytes / (1024.0 * 1024.0):F1} MB reclaimed from {folder}"
+                + (undeleted > 0 ? $", {undeleted} could not be deleted and will be tried again" : ""));
+            return new DiskBufferPurgeReport(deleted, freedBytes, undeleted);
         }
     }
+
+    /// <summary>
+    /// What a disk buffer purge did: files gone, bytes back, and files it could not delete this time.
+    /// </summary>
+    internal sealed record DiskBufferPurgeReport(int DeletedFiles, long ReclaimedBytes, int UndeletedFiles);
 }

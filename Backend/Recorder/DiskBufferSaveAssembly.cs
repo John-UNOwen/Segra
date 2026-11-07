@@ -77,7 +77,10 @@ namespace Segra.Backend.Recorder
             ISteps? steps = null)
         {
             ISteps io = steps ?? new MuxerSteps();
-            string stagedPath = PathUtils.Combine(stagingFolder, outputFileName);
+            // Staged under the interrupted-save marker: a save killed mid-concat leaves this file behind
+            // (ffmpeg outlives the app and finishes writing it), and the marker is what tells the buffer
+            // purge it is a discarded save rather than footage.
+            string stagedPath = PathUtils.Combine(stagingFolder, outputFileName + InterruptedSaveMarker);
             string concatPath = Path.Combine(Path.GetTempPath(), $"segra_disk_buffer_concat_{Guid.NewGuid():N}.txt");
 
             try

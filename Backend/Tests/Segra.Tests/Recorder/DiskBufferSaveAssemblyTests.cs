@@ -158,14 +158,32 @@ namespace Segra.Tests.Recorder
             public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
         }
 
+        [Fact]
+        public async Task TheStagedSaveCarriesTheMarkerThePurgeDeletesBy()
+        {
+            // ffmpeg assembles under a name the buffer purge recognises as ours. A hard kill mid-concat
+            // lets ffmpeg finish the file after Segra is gone, and the next start has to be able to tell
+            // that multi-GB leftover from footage somebody should keep.
+            var steps = new RenamingSteps();
+
+            var outcome = await DiskBufferSaveAssembly.RunAsync(
+                _staging, _library, FileName, ConcatLines(), "", 61.2, steps);
+
+            Assert.True(outcome.Succeeded);
+            Assert.Equal(FileName + DiskBufferSaveAssembly.InterruptedSaveMarker, Path.GetFileName(steps.StagedPath));
+            Assert.Equal(PathUtils.Normalize(_staging), PathUtils.Normalize(Path.GetDirectoryName(steps.StagedPath) ?? ""));
+        }
+
         /// <summary>The normal case: the staged file is renamed into its library name.</summary>
         private sealed class RenamingSteps : DiskBufferSaveAssembly.ISteps
         {
             public string? ConcatListPath { get; private set; }
             public bool ConcatListExisted { get; private set; }
+            public string? StagedPath { get; private set; }
 
             public Task RunConcatAsync(string ffmpegArguments, string stagedPath, double expectedContentSeconds)
             {
+                StagedPath = stagedPath;
                 ConcatListPath = ExtractQuotedPath(ffmpegArguments, "-i");
                 ConcatListExisted = ConcatListPath != "" && File.Exists(ConcatListPath);
                 File.WriteAllText(stagedPath, "assembled replay");
