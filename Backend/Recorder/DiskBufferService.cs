@@ -127,7 +127,10 @@ namespace Segra.Backend.Recorder
             {
                 if (_output != null)
                 {
+                    // The recording already running owns the service's output; this one was built for a
+                    // start that is not happening, so release only what was handed to us here.
                     Log.Warning("Disk buffer is already active");
+                    DisposeUnstarted(output);
                     return false;
                 }
 
@@ -143,7 +146,11 @@ namespace Segra.Backend.Recorder
                 }
                 catch (Exception ex)
                 {
+                    // Same teardown as the branches below: this output already has its format, encoders
+                    // and the Stopped signal wired, and dropping it here without disposing leaves the
+                    // native muxer and that signal connection waiting on an ObsKit finalizer.
                     Log.Error(ex, $"Failed to create disk buffer folder {_segmentFolder}");
+                    CleanupOutput(output);
                     return false;
                 }
 
@@ -216,6 +223,15 @@ namespace Segra.Backend.Recorder
                 try { connection.Dispose(); } catch { /* nothing actionable */ }
             }
             try { output.Dispose(); } catch (Exception ex) { Log.Warning(ex, "Failed to dispose disk buffer output"); }
+        }
+
+        /// <summary>
+        /// Releases an output this service never took ownership of - the start was refused before the
+        /// output became the recording's.
+        /// </summary>
+        private static void DisposeUnstarted(RecordingOutput output)
+        {
+            try { output.Dispose(); } catch (Exception ex) { Log.Warning(ex, "Failed to dispose a disk buffer output that never started"); }
         }
 
         private static void OnFileChanged(nint calldata)

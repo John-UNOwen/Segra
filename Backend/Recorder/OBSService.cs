@@ -1920,8 +1920,9 @@ namespace Segra.Backend.Recorder
 
                 if (!DiskBufferService.Start(_output, sanitizedGameName, eff.DiskBufferDuration))
                 {
-                    // The service already disposed the output on failure. No HDR retry here: the
-                    // start failure is the whole disk pipeline, not just the encoder.
+                    // Start disposes the output on every path where it refuses the start, so this only
+                    // drops our reference; the muxer and its Stopped connection are already released.
+                    // No HDR retry here: the start failure is the whole disk pipeline, not just the encoder.
                     _output = null;
                     GameDetectionService.PreventRetryRecording = true;
                     Task.Run(() => ShowModal("Disk buffer failed", "Failed to start the disk buffer recording. Check the log for more details.", "error"));
