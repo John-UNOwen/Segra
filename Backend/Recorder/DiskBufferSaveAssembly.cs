@@ -17,15 +17,15 @@ namespace Segra.Backend.Recorder
     /// the startup purge empties the whole tree, so a save killed mid-concat cannot leave a half-written
     /// replay the library would present as complete.
     ///
-    /// Publishing is the delicate part. A rename inside the library folder is atomic; a rename across
-    /// volumes is a copy followed by a delete, and a copy that is interrupted leaves a truncated mp4
-    /// sitting under a library name. So the assembly publishes with a rename, and only falls back to a
-    /// copy when the rename fails - the copy goes in under the interrupted-save marker and is renamed
-    /// into its final name once it is complete, so a partial never carries a library name. The staged
-    /// original is kept until the destination exists: on a folder where a rename fails on a transient
-    /// lock (an antivirus scan or the indexer opening the file ffmpeg just closed) the staged file is the
-    /// only complete copy of that footage, and the recording's segments are purged as soon as the stop
-    /// finishes.
+    /// Publishing is the delicate part. A rename is atomic only inside one volume; across volumes it is a
+    /// copy followed by a delete, and a copy that is interrupted leaves a truncated mp4 sitting under a
+    /// library name. So the assembly renames when the staging folder and the library share a volume, and
+    /// otherwise publishes by copy - and a copy always goes in under the interrupted-save marker and is
+    /// renamed into its final name only once it is complete, so a partial never carries a library name. The
+    /// staged original is kept until the destination exists: on a folder where a rename fails on a
+    /// transient lock (an antivirus scan or the indexer opening the file ffmpeg just closed) the staged
+    /// file is the only complete copy of that footage, and the recording's segments are purged as soon as
+    /// the stop finishes.
     /// </summary>
     internal static class DiskBufferSaveAssembly
     {
@@ -38,12 +38,14 @@ namespace Segra.Backend.Recorder
         private static int _ffmpegProcessSeq;
 
         /// <summary>
-        /// The outside world the assembly needs: run the concat, move a file, copy a file. Tests drive it
-        /// with a rename that fails so the copy paths can be reached on a single-volume machine.
+        /// The outside world the assembly needs: run the concat, say whether two paths share a volume,
+        /// move a file, copy a file. Tests drive it with a rename that fails and with staging on another
+        /// volume, so the copy paths can be reached on a single-volume machine.
         /// </summary>
         internal interface ISteps
         {
             Task RunConcatAsync(string ffmpegArguments, string stagedPath, double expectedContentSeconds);
+            bool SameVolume(string source, string destination);
             void MoveFile(string source, string destination);
             void CopyFile(string source, string destination);
         }
@@ -135,22 +137,35 @@ namespace Segra.Backend.Recorder
         /// </summary>
         private static Outcome Publish(ISteps io, string stagedPath, string outputPath)
         {
-            try
+            // A rename is atomic only inside one volume. Across volumes File.Move is a copy followed by a
+            // delete, and a kill partway through that copy leaves a truncated mp4 under a library name -
+            // exactly what staging the assembly in the buffer folder exists to prevent. A cross-volume
+            // publish therefore never moves between folders: it copies under the marker and renames that
+            // inside the destination folder, where a rename is atomic again.
+            if (io.SameVolume(stagedPath, outputPath))
             {
-                io.MoveFile(stagedPath, outputPath);
-                return Published(outputPath, "moved");
-            }
-            catch (Exception moveError)
-            {
-                Log.Warning(moveError, $"Could not move the assembled replay into the library: {outputPath}; copying instead");
+                try
+                {
+                    io.MoveFile(stagedPath, outputPath);
+                    return Published(outputPath, "renamed");
+                }
+                catch (Exception moveError)
+                {
+                    Log.Warning(moveError, $"Could not rename the assembled replay into the library: {outputPath}; copying instead");
+                }
             }
 
+            return CopyIntoPlace(io, stagedPath, outputPath);
+        }
+
+        private static Outcome CopyIntoPlace(ISteps io, string stagedPath, string outputPath)
+        {
             string markerPath = outputPath + InterruptedSaveMarker;
             try
             {
                 io.CopyFile(stagedPath, markerPath);
+                // Same folder now: renaming the finished copy into its library name is a rename.
                 io.MoveFile(markerPath, outputPath);
-                // The destination exists now, so the staged original is redundant.
                 DeleteQuietly(stagedPath);
                 return Published(outputPath, "copied");
             }
@@ -265,6 +280,12 @@ namespace Segra.Backend.Recorder
             public void MoveFile(string source, string destination) => File.Move(source, destination);
 
             public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
+
+            public bool SameVolume(string source, string destination) =>
+                string.Equals(
+                    Path.GetPathRoot(Path.GetFullPath(source)),
+                    Path.GetPathRoot(Path.GetFullPath(destination)),
+                    StringComparison.OrdinalIgnoreCase);
         }
     }
 }

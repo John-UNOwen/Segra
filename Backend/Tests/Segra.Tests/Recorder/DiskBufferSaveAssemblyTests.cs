@@ -60,11 +60,9 @@ namespace Segra.Tests.Recorder
         [Fact]
         public async Task ARenameTheDestinationRefusesFallsBackToAMarkerCopy()
         {
-            // The rename into the library is a copy followed by a delete whenever the buffer folder is on
-            // another volume, and even on one volume the destination can refuse the file: an antivirus
-            // scan or the indexer opening what ffmpeg just closed. The fallback copies into the same
-            // folder under the interrupted-save marker and renames that - a rename inside one folder -
-            // into the final name.
+            // Even on one volume the destination can refuse the file: an antivirus scan or the indexer
+            // opening what ffmpeg just closed. The fallback copies into the same folder under the
+            // interrupted-save marker and renames that - a rename inside one folder - into the final name.
             var steps = new RenameRefusedOnce();
 
             var outcome = await DiskBufferSaveAssembly.RunAsync(
@@ -155,6 +153,8 @@ namespace Segra.Tests.Recorder
 
             public void MoveFile(string source, string destination) => File.Move(source, destination);
 
+            public bool SameVolume(string source, string destination) => true;
+
             public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
         }
 
@@ -174,6 +174,59 @@ namespace Segra.Tests.Recorder
             Assert.Equal(PathUtils.Normalize(_staging), PathUtils.Normalize(Path.GetDirectoryName(steps.StagedPath) ?? ""));
         }
 
+        [Fact]
+        public async Task ACrossVolumeSaveIsCopiedIntoPlaceInsteadOfRenamed()
+        {
+            // A buffer folder on another drive: File.Move there is a copy followed by a delete, and a kill
+            // during it leaves a truncated mp4 under the library name, which is exactly what staging the
+            // assembly in the buffer folder was written to prevent. The publish has to copy under the
+            // marker and rename the finished copy inside its own folder, where a rename is atomic.
+            var steps = new OtherVolumeSteps();
+
+            var outcome = await DiskBufferSaveAssembly.RunAsync(
+                _staging, _library, FileName, ConcatLines(), "", 61.2, steps);
+
+            Assert.True(outcome.Succeeded);
+            Assert.False(steps.RenameAttempted);
+            Assert.Equal("assembled replay", File.ReadAllText(Path.Combine(_library, FileName)));
+            Assert.Empty(FilesUnder(_staging));
+            Assert.Empty(FilesUnder(_library, "*" + DiskBufferSaveAssembly.InterruptedSaveMarker));
+        }
+
+        /// <summary>
+        /// Staging folder and library folder on different drives. This machine has one volume, so the drive
+        /// question is answered at the seam; what has to be observable is that a cross-volume publish does
+        /// not rename. A rename across volumes is File.Move's copy followed by a delete, and a kill in the
+        /// middle of it leaves a truncated mp4 sitting under a library name.
+        /// </summary>
+        private sealed class OtherVolumeSteps : DiskBufferSaveAssembly.ISteps
+        {
+            public bool RenameAttempted { get; private set; }
+
+            public Task RunConcatAsync(string ffmpegArguments, string stagedPath, double expectedContentSeconds)
+            {
+                File.WriteAllText(stagedPath, "assembled replay");
+                return Task.CompletedTask;
+            }
+
+            public bool SameVolume(string source, string destination) => false;
+
+            public void MoveFile(string source, string destination)
+            {
+                // Only a rename between folders is the cross-volume copy in disguise; the rename from the
+                // marker into its final name happens inside the destination folder and is a real rename.
+                if (!string.Equals(Path.GetDirectoryName(source), Path.GetDirectoryName(destination), StringComparison.OrdinalIgnoreCase))
+                {
+                    RenameAttempted = true;
+                    throw new IOException("A rename across volumes is a copy, not a rename");
+                }
+
+                File.Move(source, destination);
+            }
+
+            public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
+        }
+
         /// <summary>The normal case: the staged file is renamed into its library name.</summary>
         private sealed class RenamingSteps : DiskBufferSaveAssembly.ISteps
         {
@@ -191,6 +244,8 @@ namespace Segra.Tests.Recorder
             }
 
             public void MoveFile(string source, string destination) => File.Move(source, destination);
+
+            public bool SameVolume(string source, string destination) => true;
 
             public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
         }
@@ -216,6 +271,8 @@ namespace Segra.Tests.Recorder
                 File.Move(source, destination);
             }
 
+            public bool SameVolume(string source, string destination) => true;
+
             public void CopyFile(string source, string destination) => File.Copy(source, destination, overwrite: true);
         }
 
@@ -227,6 +284,8 @@ namespace Segra.Tests.Recorder
                 File.WriteAllText(stagedPath, "assembled replay");
                 return Task.CompletedTask;
             }
+
+            public bool SameVolume(string source, string destination) => true;
 
             public void MoveFile(string source, string destination) =>
                 throw new IOException("The process cannot access the file because it is being used by another process");
