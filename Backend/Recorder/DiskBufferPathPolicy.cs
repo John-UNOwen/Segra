@@ -41,8 +41,39 @@ namespace Segra.Backend.Recorder
                 return false;
             }
 
+            if (IsInsideLibraryFolders(candidate, contentFolder, out string libraryFolder))
+            {
+                reason = $"'{configured}' sits inside the '{libraryFolder}' library folder";
+                return false;
+            }
+
             root = candidate;
             return true;
+        }
+
+        /// <summary>
+        /// True when the candidate is, contains, or lives under one of the four library folders.
+        /// Segments there would be scanned as content and deleted by the storage-limit cleanup, and
+        /// a purge there would delete the library itself.
+        /// </summary>
+        private static bool IsInsideLibraryFolders(string candidate, string contentFolder, out string libraryFolder)
+        {
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+
+            foreach (string name in new[] { FolderNames.Sessions, FolderNames.Buffers, FolderNames.Clips, FolderNames.Highlights })
+            {
+                string library = Canonical(PathUtils.Combine(contentFolder, name));
+                if (string.Equals(candidate, library, comparison) ||
+                    candidate.StartsWith(library + "/", comparison) ||
+                    library.StartsWith(candidate + "/", comparison))
+                {
+                    libraryFolder = name;
+                    return true;
+                }
+            }
+
+            libraryFolder = "";
+            return false;
         }
 
         // Full path resolution collapses '..' segments and drops the trailing separator, so the
