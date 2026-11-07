@@ -689,9 +689,10 @@ namespace Segra.Backend.Recorder
         }
 
         /// <summary>
-        /// Startup cleanup: segments left by a crash are stale by definition. Deletes everything
-        /// under the resolved root (a missing folder is fine) and logs what was reclaimed. Refuses
-        /// to touch a folder that could hold real content.
+        /// Startup cleanup: segments left by a crash are stale by definition. Removes the segment
+        /// files under the resolved root (a missing folder is fine) and logs what was reclaimed.
+        /// Only files OBS named as segments are touched, so a buffer folder the user pointed at
+        /// somewhere that also holds other work keeps that other work.
         /// </summary>
         public static void PurgeAll()
         {
@@ -722,6 +723,12 @@ namespace Segra.Backend.Recorder
             }
         }
 
+        // OBS names segments seg_<CCYY-MM-DD>_<hh-mm-ss>.mkv (the format passed to WithFileSplitting).
+        // This is the marker that says a file under the buffer root is ours to delete.
+        private static bool IsSegmentFileName(string fileName) =>
+            fileName.StartsWith("seg_", StringComparison.OrdinalIgnoreCase) &&
+            fileName.EndsWith(".mkv", StringComparison.OrdinalIgnoreCase);
+
         private static void PurgeFolder(string folder)
         {
             if (!Directory.Exists(folder))
@@ -731,6 +738,9 @@ namespace Segra.Backend.Recorder
             long freedBytes = 0;
             foreach (string file in Directory.GetFiles(folder, "*", SearchOption.AllDirectories))
             {
+                if (!IsSegmentFileName(Path.GetFileName(file)))
+                    continue;
+
                 try
                 {
                     long size = new FileInfo(file).Length;
