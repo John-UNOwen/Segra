@@ -3947,16 +3947,16 @@ namespace Segra.Backend.Recorder
         }
 
         // Bytes the rolling disk buffer actually adds per check interval: the write rate minus what
-        // pruning has been reclaiming, since the window is bounded. Before the first prune the whole
-        // window is still being written, and a save pins the segments so reclaim pauses; both keep
-        // the full write rate, and a prune that stops working raises the headroom back up.
+        // pruning reclaimed in the last interval, since the window is bounded. Before pruning has a
+        // completed interval to report, and while a save pins the segments, it keeps the full write
+        // rate, and a prune that stops working raises the headroom back up within one interval.
         private static long GetDiskBufferGrowthBytesPerInterval(long intervalSeconds)
         {
             long writeBytes = EstimateRecordingBytesPerSecond() * intervalSeconds;
             if (DiskBufferService.IsSaving)
                 return writeBytes;
 
-            long reclaimedBytesPerInterval = (long)DiskBufferService.EstimateReclaimedBytesPerSecond() * intervalSeconds;
+            long reclaimedBytesPerInterval = (long)DiskBufferService.EstimateReclaimedBytesPerSecond(TimeSpan.FromSeconds(intervalSeconds)) * intervalSeconds;
             Log.Debug($"Disk buffer monitor headroom: {writeBytes} B written per interval, {reclaimedBytesPerInterval} B reclaimed by pruning");
             return Math.Max(0, writeBytes - reclaimedBytesPerInterval);
         }

@@ -41,8 +41,10 @@ namespace Segra.Backend.Recorder
         private readonly List<DiskBufferSegment> _segments = new();
         private readonly int _windowSeconds;
 
-        private DateTime? _firstReclaimAt;
         private long _reclaimedBytes;
+        private DateTime? _sampleAt;
+        private long _sampleBytes;
+        private double _lastSampleRate;
         private bool _stopping;
 
         public DiskBufferLedger(int windowSeconds) => _windowSeconds = windowSeconds;
@@ -66,16 +68,40 @@ namespace Segra.Backend.Recorder
             lock (_lock) _stopping = true;
         }
 
-        /// <summary>Total bytes pruning has deleted for this recording.</summary>
-        public long ReclaimedBytes
+        /// <summary>
+        /// What pruning has been reclaiming in the last sampling interval, in bytes per second, or 0
+        /// when nothing was reclaimed in it. The ledger keeps its own sample - the time and the
+        /// reclaimed total at that time - and answers with the difference since then, so the figure
+        /// follows what pruning is doing now instead of averaging the whole recording: a prune that
+        /// stops working sends the headroom back to the full write rate within one interval, and the
+        /// first look after the first prune reports nothing instead of dividing that prune by the few
+        /// milliseconds since it started.
+        ///
+        /// A look that arrives before the interval has run (the monitor reads the threshold more than
+        /// once per tick) answers with the previous interval's figure instead of inventing a rate out
+        /// of the gap between the two looks.
+        /// </summary>
+        public double EstimateReclaimedBytesPerSecond(DateTime now, TimeSpan samplingInterval)
         {
-            get { lock (_lock) return _reclaimedBytes; }
-        }
+            lock (_lock)
+            {
+                if (_sampleAt == null)
+                {
+                    _sampleAt = now;
+                    _sampleBytes = _reclaimedBytes;
+                    return 0;
+                }
 
-        /// <summary>When this recording's first segment was reclaimed, or null before that.</summary>
-        public DateTime? FirstReclaimAt
-        {
-            get { lock (_lock) return _firstReclaimAt; }
+                double seconds = (now - _sampleAt.Value).TotalSeconds;
+                if (seconds < samplingInterval.TotalSeconds)
+                    return _lastSampleRate;
+
+                double rate = seconds > 0 ? (_reclaimedBytes - _sampleBytes) / seconds : 0;
+                _sampleAt = now;
+                _sampleBytes = _reclaimedBytes;
+                _lastSampleRate = rate;
+                return rate;
+            }
         }
 
         /// <summary>Snapshot of the ledger in file order. The entries are the live segments.</summary>
@@ -156,15 +182,15 @@ namespace Segra.Backend.Recorder
         }
 
         /// <summary>
-        /// The file is gone: drop it from the ledger and account the space it gave back.
+        /// The file is gone: drop it from the ledger and add the space it gave back to the running
+        /// total the reclaim estimate is sampled from.
         /// </summary>
-        public void AccountReclaim(DiskBufferSegment segment, long freedBytes, DateTime now)
+        public void AccountReclaim(DiskBufferSegment segment, long freedBytes)
         {
             lock (_lock)
             {
                 _segments.Remove(segment);
                 segment.DeletePending = false;
-                _firstReclaimAt ??= now;
                 _reclaimedBytes += freedBytes;
             }
         }

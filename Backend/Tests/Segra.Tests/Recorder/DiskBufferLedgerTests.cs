@@ -15,6 +15,10 @@ namespace Segra.Tests.Recorder
     public class DiskBufferLedgerTests
     {
         private const int WindowSeconds = 120;
+
+        // The disk monitor looks at the ledger once a minute.
+        private static readonly TimeSpan MonitorInterval = TimeSpan.FromSeconds(60);
+
         private static readonly DateTime T0 = new DateTime(2026, 11, 4, 12, 0, 0);
 
         private static string SegmentName(int offsetSeconds) =>
@@ -60,8 +64,8 @@ namespace Segra.Tests.Recorder
             Assert.Equal(new[] { SegmentName(20) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(165))));
 
             // The deletes land: the files leave the ledger.
-            ledger.AccountReclaim(offered[0], 10_485_760, T0.AddSeconds(165));
-            ledger.AccountReclaim(offered[1], 10_485_760, T0.AddSeconds(165));
+            ledger.AccountReclaim(offered[0], 10_485_760);
+            ledger.AccountReclaim(offered[1], 10_485_760);
             Assert.Equal(new[] { SegmentName(20), SegmentName(30) }, CandidatePaths(ledger.Segments));
 
             // A delete that could not run (the muxer still holds the file) is offered again later.
@@ -143,6 +147,51 @@ namespace Segra.Tests.Recorder
             Assert.Equal(
                 new[] { SegmentName(0), SegmentName(10), SegmentName(20), SegmentName(30), SegmentName(40) },
                 CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
+        }
+
+        [Fact]
+        public void TheReclaimRateIsTheLastSamplingIntervalNotTheWholeRecording()
+        {
+            // A recording whose window has already filled: files every 10 s up to +400 with a 120 s
+            // window, so pruning has been running since +130.
+            var ledger = Recording(lastBoundaryOffset: 400);
+
+            // Nothing has been compared yet, so the monitor is told nothing was reclaimed and keeps
+            // its full write-rate headroom.
+            Assert.Equal(0d, ledger.EstimateReclaimedBytesPerSecond(T0.AddSeconds(460), MonitorInterval), 3);
+
+            // Pruning keeps up: 12 MB left the folder between two looks 60 s apart.
+            PruneOne(ledger, T0.AddSeconds(470), 12_000_000);
+            Assert.Equal(200_000d, ledger.EstimateReclaimedBytesPerSecond(T0.AddSeconds(520), MonitorInterval), 3);
+
+            // Deletes stop working - a reader holds the file and it stays on disk. One interval later
+            // the rate is back at zero instead of decaying as 1/t and reading as net growth of nothing
+            // for hours while the folder fills at the full write rate.
+            Assert.Equal(0d, ledger.EstimateReclaimedBytesPerSecond(T0.AddSeconds(580), MonitorInterval), 3);
+        }
+
+        [Fact]
+        public void TheFirstPruneDoesNotStandInForASamplingInterval()
+        {
+            var ledger = Recording(lastBoundaryOffset: 400);
+
+            // The monitor's first look lands on top of the very first prune. Dividing the reclaimed
+            // total by the few milliseconds since pruning started reads as gigabytes a second, the
+            // subtraction clamps to zero and the low-space threshold sits at its floor during exactly
+            // the interval the window fills.
+            PruneOne(ledger, T0.AddSeconds(400), 72_000_000);
+            Assert.Equal(0d, ledger.EstimateReclaimedBytesPerSecond(T0.AddSeconds(400), MonitorInterval), 3);
+
+            // From the next look on the figure is what that interval reclaimed: 12 MB in 60 s.
+            PruneOne(ledger, T0.AddSeconds(430), 12_000_000);
+            Assert.Equal(200_000d, ledger.EstimateReclaimedBytesPerSecond(T0.AddSeconds(460), MonitorInterval), 3);
+        }
+
+        private static void PruneOne(DiskBufferLedger ledger, DateTime now, long freedBytes)
+        {
+            var offered = ledger.CollectPrunable(now);
+            Assert.NotEmpty(offered);
+            ledger.AccountReclaim(offered[0], freedBytes);
         }
 
         private static string[] CandidatePaths(IEnumerable<DiskBufferSegment> segments)

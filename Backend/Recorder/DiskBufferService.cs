@@ -53,21 +53,15 @@ namespace Segra.Backend.Recorder
         public static bool IsSaving => Volatile.Read(ref _saveActive) == 1;
 
         /// <summary>
-        /// Average bytes per second pruning has reclaimed since it started for this recording, or 0
-        /// before the first segment has been pruned. OBSService subtracts it from the write rate to
-        /// get the disk buffer's net growth; a broken prune keeps it low and the headroom high.
+        /// Bytes per second pruning reclaimed during the disk monitor's last sampling interval, or 0
+        /// when it reclaimed nothing during it. OBSService subtracts it from the write rate to get the
+        /// disk buffer's net growth, so a prune that stops working raises the headroom back to the full
+        /// write rate within one interval. The interval is the monitor's own: the ledger is read when
+        /// the monitor looks.
         /// </summary>
-        public static double EstimateReclaimedBytesPerSecond()
+        public static double EstimateReclaimedBytesPerSecond(TimeSpan samplingInterval)
         {
-            DiskBufferLedger? ledger = _ledger;
-            DateTime? firstReclaim = ledger?.FirstReclaimAt;
-            long reclaimedBytes = ledger?.ReclaimedBytes ?? 0;
-
-            if (firstReclaim == null || reclaimedBytes <= 0)
-                return 0;
-
-            double seconds = (DateTime.Now - firstReclaim.Value).TotalSeconds;
-            return seconds > 0 ? reclaimedBytes / seconds : 0;
+            return _ledger?.EstimateReclaimedBytesPerSecond(DateTime.Now, samplingInterval) ?? 0;
         }
 
         internal sealed record DiskBufferSaveResult(
@@ -239,7 +233,7 @@ namespace Segra.Backend.Recorder
                         size = info.Length;
                         File.Delete(segment.Path);
                     }
-                    ledger?.AccountReclaim(segment, size, DateTime.Now);
+                    ledger?.AccountReclaim(segment, size);
                     deleted++;
                     freedBytes += size;
                     Log.Debug($"Deleted disk buffer segment {segment.Path} ({size} bytes)");
