@@ -3929,17 +3929,20 @@ namespace Segra.Backend.Recorder
         }
 
         // Free-space threshold at which we stop recording: enough to cover one check interval of
-        // writing (with margin) plus a finalization buffer, never below the absolute floor.
+        // writing (with margin) plus a finalization buffer, never below the absolute floor. A rolling
+        // disk buffer instead guards what it actually grows by and the save output it will write, so
+        // its threshold comes from DiskBufferSpacePolicy.
         private static long GetRecordingFreeSpaceThresholdBytes()
         {
             long intervalSeconds = DiskSpaceCheckIntervalMs / 1000;
+
+            if (DiskBufferService.IsActive)
+                return DiskBufferSpacePolicy.FreeSpaceThresholdBytes(
+                    DiskBufferMonitorSample(intervalSeconds),
+                    StorageService.MinimumRecordingFreeSpaceBytes);
+
             long bytesPerInterval = EstimateRecordingBytesPerSecond() * intervalSeconds;
             const long finalizationBufferBytes = 128L * 1024 * 1024; // 128 MB to finalize the file
-
-            // The disk buffer only grows by what pruning fails to reclaim; reserving headroom for
-            // the raw write rate would stop a healthy disk recording once its window fills.
-            if (DiskBufferService.IsActive)
-                bytesPerInterval = GetDiskBufferGrowthBytesPerInterval(intervalSeconds);
 
             long perIntervalWithMargin = (long)(bytesPerInterval * 1.5);
             long threshold = perIntervalWithMargin + finalizationBufferBytes;
