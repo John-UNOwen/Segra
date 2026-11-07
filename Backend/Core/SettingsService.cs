@@ -145,7 +145,7 @@ namespace Segra.Backend.Core
             }
         }
 
-        private static bool TryLoadSettingsFile(string path)
+        internal static bool TryLoadSettingsFile(string path)
         {
             try
             {
@@ -242,7 +242,14 @@ namespace Segra.Backend.Core
                     }
                 }
 
-                Settings.Instance.RunOnStartup = PlatformServices.Startup.GetStartupStatus();
+                // A settings file is applied property by property, so this is the only place that
+                // sees the final content folder and can judge the buffer folder next to it.
+                SanitizeDiskBufferFolder(Settings.Instance, "loaded from file");
+
+                // The startup shortcut state is a platform read, not part of the file. It must not
+                // throw the settings that were just loaded away.
+                if (PlatformServices.Startup != null)
+                    Settings.Instance.RunOnStartup = PlatformServices.Startup.GetStartupStatus();
 
                 Log.Information("Settings loaded from {0}", path);
 
@@ -1006,6 +1013,28 @@ namespace Segra.Backend.Core
 
             if (previousCacheFolder != null)
                 await MigrateCacheFolder(previousCacheFolder, settings.CacheFolder);
+        }
+
+        /// <summary>
+        /// Applies the disk buffer folder rules to whatever is currently in the settings: a value
+        /// that cannot be recorded into safely is dropped back to the derived default. An empty
+        /// setting stays empty, because empty means "derive it from the content folder at use time".
+        /// </summary>
+        internal static void SanitizeDiskBufferFolder(Settings settings, string source)
+        {
+            string configured = settings.DiskBufferFolder;
+            if (string.IsNullOrWhiteSpace(configured))
+                return;
+
+            if (DiskBufferPathPolicy.TryResolve(configured, settings.ContentFolder, out string root, out string reason))
+            {
+                if (root != configured)
+                    settings.DiskBufferFolder = root;
+                return;
+            }
+
+            Log.Warning($"Ignoring disk buffer folder '{configured}' ({source}): {reason}");
+            settings.DiskBufferFolder = string.Empty;
         }
 
         private static bool IsAbsolutePath(string? path) =>
