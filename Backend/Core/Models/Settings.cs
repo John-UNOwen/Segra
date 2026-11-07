@@ -1610,9 +1610,28 @@ namespace Segra.Backend.Core.Models
         public int ReplayBufferMaxSize { get; set; } = 1000;
 
         // Nullable on purpose: override JSON written before this setting existed has no key, and the
-        // game has to inherit the global DiskBufferDuration instead of a hardcoded default.
+        // game has to inherit the global DiskBufferDuration instead of a hardcoded default. Clamped
+        // like the global setting: a game window is fed straight into the prune age and save window.
+        private int? _diskBufferDuration;
+
         [JsonPropertyName("diskBufferDuration")]
-        public int? DiskBufferDuration { get; set; }
+        public int? DiskBufferDuration
+        {
+            get => _diskBufferDuration;
+            set
+            {
+                if (value == null)
+                {
+                    _diskBufferDuration = null;
+                    return;
+                }
+
+                int clamped = Math.Clamp(value.Value, 30, 1800);
+                if (clamped != value.Value)
+                    Log.Warning($"Game DiskBufferDuration '{value}' is outside 30-1800 seconds, using '{clamped}'");
+                _diskBufferDuration = clamped;
+            }
+        }
     }
 
     // Game integration settings - each game has its own settings object
