@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
+using Serilog;
 
 namespace Segra.Backend.Recorder
 {
@@ -30,6 +32,11 @@ namespace Segra.Backend.Recorder
     /// </summary>
     internal sealed class DiskBufferLedger
     {
+        // Stop() emits a trailing file_changed whose next segment is a ~1 KB unparseable stub, and a
+        // forced split leaves a partial remnant behind (measured 1,018,129 B). A segment below this
+        // size is not worth a place in the concat list and is not worth pinning.
+        public const long MinSegmentBytes = 1_048_576;
+
         private readonly object _lock = new();
         private readonly List<DiskBufferSegment> _segments = new();
         private readonly int _windowSeconds;
@@ -163,23 +170,55 @@ namespace Segra.Backend.Recorder
         }
 
         /// <summary>
-        /// Pins the closed segments whose span overlaps a window that opened at windowStart, so pruning
-        /// cannot delete them while a save reads them. The open (newest) segment is never saveable.
+        /// The segments a save whose window opened at windowStart writes, in ledger order, pinned so
+        /// pruning cannot take them while ffmpeg reads them.
+        ///
+        /// A closed segment belongs to the window when it ended after the window opened; the open
+        /// (newest) segment is still being written and is never saveable. sizeProbe reports a
+        /// candidate's size, or null when the file cannot be read: a segment below MinSegmentBytes is
+        /// the partial remnant a forced split leaves, is dropped, and stays prunable - a save never
+        /// holds a file it is not writing.
+        ///
+        /// The probe waits on the muxer closing each file, which can take seconds, so it runs with no
+        /// lock held, and a candidate that has left the ledger in the meantime is skipped.
         /// </summary>
-        public List<DiskBufferSegment> PinOverlapping(DateTime windowStart)
+        public async Task<List<DiskBufferSegment>> SelectSaveWindowAsync(
+            DateTime windowStart,
+            Func<DiskBufferSegment, Task<long?>> sizeProbe)
         {
+            List<DiskBufferSegment> overlapping;
             lock (_lock)
             {
-                var pinned = new List<DiskBufferSegment>();
+                overlapping = new List<DiskBufferSegment>();
                 foreach (DiskBufferSegment segment in _segments)
                 {
                     if (segment.EndedAt == null || segment.EndedAt.Value <= windowStart)
                         continue;
-                    segment.Pins++;
-                    pinned.Add(segment);
+                    overlapping.Add(segment);
                 }
-                return pinned;
             }
+
+            var selected = new List<DiskBufferSegment>();
+            foreach (DiskBufferSegment segment in overlapping)
+            {
+                long? size = await sizeProbe(segment);
+                if (size == null)
+                    continue;
+                if (size.Value < MinSegmentBytes)
+                {
+                    Log.Information($"Skipping disk segment from the save (stub, {size.Value} B): {segment.Path}");
+                    continue;
+                }
+
+                lock (_lock)
+                {
+                    if (!_segments.Contains(segment))
+                        continue;
+                    segment.Pins++;
+                }
+                selected.Add(segment);
+            }
+            return selected;
         }
 
         /// <summary>

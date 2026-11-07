@@ -81,20 +81,41 @@ namespace Segra.Tests.Recorder
         }
 
         [Fact]
-        public void ASavePinsTheSegmentsItIsReadingAndReleasesThemAfterwards()
+        public async Task ASaveOnlyPinsTheSegmentsItActuallyWrites()
         {
-            var ledger = Recording();
+            // A window wide enough to cover every closed file. The one opened at +30 is the 1,018,129 B
+            // remnant a forced split leaves behind: under the 1 MiB floor a selection applies, so it
+            // never reaches the concat list.
+            var ledger = Recording(lastBoundaryOffset: 40);
+            var selected = await ledger.SelectSaveWindowAsync(
+                T0.AddSeconds(-80),
+                segment => Task.FromResult<long?>(segment.Path == SegmentName(30) ? 1_018_129L : 10_485_761L));
 
-            // A window that opened at +15 overlaps the files that closed at +20 and +30.
-            var pinned = ledger.PinOverlapping(T0.AddSeconds(15));
-            Assert.Equal(new[] { SegmentName(10), SegmentName(20) }, CandidatePaths(pinned));
+            Assert.Equal(new[] { SegmentName(0), SegmentName(10), SegmentName(20) }, CandidatePaths(selected));
 
-            // Pruning cannot reclaim them out from under the save; the file the save is not holding
-            // still goes.
-            Assert.Equal(new[] { SegmentName(0) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
+            // A file the save dropped is not held: pruning keeps reclaiming it for the whole save
+            // instead of leaving it pinned until the save ends.
+            Assert.Equal(new[] { SegmentName(30) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
+        }
 
-            ledger.Unpin(pinned);
-            Assert.Equal(new[] { SegmentName(10), SegmentName(20) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
+        [Fact]
+        public async Task ASavePinsTheSegmentsItIsReadingAndReleasesThemAfterwards()
+        {
+            var ledger = Recording(lastBoundaryOffset: 40);
+
+            // A window that opened at +25 covers the files that closed at +30 and +40, and nothing
+            // before them.
+            var selected = await ledger.SelectSaveWindowAsync(
+                T0.AddSeconds(25),
+                _ => Task.FromResult<long?>(10_485_761L));
+            Assert.Equal(new[] { SegmentName(20), SegmentName(30) }, CandidatePaths(selected));
+
+            // Pruning cannot reclaim a file out from under the save; the older ones it is not holding
+            // still go.
+            Assert.Equal(new[] { SegmentName(0), SegmentName(10) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
+
+            ledger.Unpin(selected);
+            Assert.Equal(new[] { SegmentName(20), SegmentName(30) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
         }
 
         [Fact]
@@ -122,25 +143,6 @@ namespace Segra.Tests.Recorder
             Assert.Equal(
                 new[] { SegmentName(0), SegmentName(10), SegmentName(20), SegmentName(30), SegmentName(40) },
                 CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
-        }
-
-        [Fact]
-        public void ASaveOnlyPinsTheSegmentsItActuallyWrites()
-        {
-            // A window ending at +40 with nothing saved before it, so every closed file overlaps it.
-            // The one opened at +30 is the 1,018,129 B remnant a forced split leaves behind, which is
-            // under the 1 MiB floor a selection applies.
-            var ledger = Recording(lastBoundaryOffset: 40);
-            var selected = ledger.SelectSaveWindow(
-                T0.AddSeconds(40),
-                TimeSpan.FromSeconds(WindowSeconds),
-                sinceLastSave: null,
-                sizeProbe: segment => segment.Path == SegmentName(30) ? 1_018_129L : 10_485_761L);
-
-            Assert.Equal(new[] { SegmentName(0), SegmentName(10), SegmentName(20) }, CandidatePaths(selected));
-
-            // A segment the save dropped is not held: pruning keeps reclaiming it for the whole save.
-            Assert.Equal(new[] { SegmentName(30) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
         }
 
         private static string[] CandidatePaths(IEnumerable<DiskBufferSegment> segments)

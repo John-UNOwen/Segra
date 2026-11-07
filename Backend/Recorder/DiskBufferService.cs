@@ -30,10 +30,6 @@ namespace Segra.Backend.Recorder
         // window therefore reaches back at most SegmentSeconds further than requestedAt-duration.
         public const int SegmentSeconds = 10;
 
-        // Stop() emits a trailing file_changed whose next segment is a ~1 KB unparseable stub;
-        // segments below this size are also skipped when selecting (a partial/empty segment).
-        private const long MinSegmentBytes = 1_048_576;
-
         private static readonly object _lock = new();
         private static readonly SemaphoreSlim _saveLock = new(1, 1);
 
@@ -373,7 +369,6 @@ namespace Segra.Backend.Recorder
             Volatile.Write(ref _saveActive, 1);
 
             DateTime requestedAt = DateTime.Now;
-            List<DiskBufferSegment> pinned = new();
             List<DiskBufferSegment> selected = new();
             string? concatPath = null;
             string? outputPath = null;
@@ -415,30 +410,22 @@ namespace Segra.Backend.Recorder
                         windowStart = _lastSaveEnd.Value;
                 }
 
-                // A closed segment overlaps the window when it ended after the window opened.
-                // The newest (open) segment is still being written and is never saveable.
-                pinned = ledger.PinOverlapping(windowStart);
-
-                // EnsureFileReady may block for seconds; pinned segments are protected from pruning
-                // while this runs.
-                foreach (DiskBufferSegment segment in pinned)
+                // Only the segments that reach the concat list are pinned; everything else, including
+                // a stub the selection dropped, keeps being reclaimed while the save runs. The probe
+                // waits on the muxer closing each file, which can take seconds.
+                selected = await ledger.SelectSaveWindowAsync(windowStart, async segment =>
                 {
                     try
                     {
                         await GeneralUtils.EnsureFileReady(segment.Path);
-                        long size = new FileInfo(segment.Path).Length;
-                        if (size < MinSegmentBytes)
-                        {
-                            Log.Information($"Skipping disk segment from the save (stub, {size} B): {segment.Path}");
-                            continue;
-                        }
-                        selected.Add(segment);
+                        return new FileInfo(segment.Path).Length;
                     }
                     catch (Exception ex)
                     {
                         Log.Warning($"Skipping disk segment from the save ({ex.Message}): {segment.Path}");
+                        return null;
                     }
-                }
+                });
 
                 if (selected.Count == 0)
                 {
@@ -550,7 +537,7 @@ namespace Segra.Backend.Recorder
                     if (succeeded)
                         _lastSaveEnd = requestedAt;
                 }
-                ledger.Unpin(pinned);
+                ledger.Unpin(selected);
                 if (concatPath != null)
                     DeleteQuietly(concatPath);
                 if (!succeeded)
