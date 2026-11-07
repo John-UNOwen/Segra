@@ -238,10 +238,10 @@ namespace Segra.Backend.Recorder
         {
             if (DiskBufferService.IsActive)
             {
-                // Disk saves assemble the file from segments instead of asking OBS; SaveAsync sends
-                // the "ReplayBufferSaveStarted" message itself, once the ledger has allowed the save.
-                _ = Task.Run(SaveDiskBufferReplay);
-                _ = Task.Run(() => PlatformServices.Sound.Play(Properties.Resources.bookmark, Settings.Instance.SoundEffectsVolume));
+                // Disk saves ask the ledger for permission first: SaveAsync sends the
+                // "ReplayBufferSaveStarted" message itself once the lease is granted, and the sound goes
+                // with that same decision, so a save the ledger refused makes neither.
+                _ = Task.Run(() => SaveDiskBufferReplay(PlayBookmarkFeedback));
                 return;
             }
 
@@ -249,6 +249,10 @@ namespace Segra.Backend.Recorder
             _ = Task.Run(SaveReplayBuffer);
             _ = Task.Run(() => PlatformServices.Sound.Play(Properties.Resources.bookmark, Settings.Instance.SoundEffectsVolume));
         }
+
+        /// <summary>The save feedback a disk save plays once its save has actually been allowed to run.</summary>
+        private static void PlayBookmarkFeedback() =>
+            _ = Task.Run(() => PlatformServices.Sound.Play(Properties.Resources.bookmark, Settings.Instance.SoundEffectsVolume));
 
         public static async Task<bool> SaveReplayBuffer()
         {
@@ -334,13 +338,14 @@ namespace Segra.Backend.Recorder
         /// Disk buffer counterpart of SaveReplayBuffer: DiskBufferService assembles the saved mp4
         /// stream-copying the segments that cover the requested window (recording keeps running
         /// throughout), then the shared finalize tail runs. Bookmarks use the save's own position
-        /// resolver because the concatenated timeline is wider than the playable content.
+        /// resolver because the concatenated timeline is wider than the playable content. saveAnnounced
+        /// runs at the moment the ledger has allowed the save, not when the hotkey was pressed.
         /// </summary>
-        public static async Task<bool> SaveDiskBufferReplay()
+        public static async Task<bool> SaveDiskBufferReplay(Action? saveAnnounced = null)
         {
             var recording = AppState.Instance.Recording ?? _alwaysOnBuffer;
 
-            var result = await DiskBufferService.SaveAsync();
+            var result = await DiskBufferService.SaveAsync(saveAnnounced);
             if (result == null)
                 return false;
 

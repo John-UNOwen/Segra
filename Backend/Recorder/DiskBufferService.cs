@@ -411,9 +411,10 @@ namespace Segra.Backend.Recorder
         /// Buffers only after ffmpeg succeeded. Returns the output path, the wall-clock save instant and
         /// a bookmark position resolver; null when the save was refused, nothing could be saved or
         /// ffmpeg failed (user is informed here, sidecars are OBSService's job). Recording keeps
-        /// running throughout.
+        /// running throughout. saveAnnounced runs here, at the moment the lease was granted and the
+        /// frontend was told the save started, so feedback for a save the ledger refused is never played.
         /// </summary>
-        public static async Task<DiskBufferSaveResult?> SaveAsync()
+        public static async Task<DiskBufferSaveResult?> SaveAsync(Action? saveAnnounced = null)
         {
             DiskBufferLedger? ledger = _ledger;
             if (!IsActive || ledger == null)
@@ -440,6 +441,18 @@ namespace Segra.Backend.Recorder
             }
 
             _ = MessageService.SendFrontendMessage("ReplayBufferSaveStarted", new { });
+
+            // The save's own feedback (the bookmark sound) belongs to this decision, not to the key press:
+            // a save the ledger refused above announced nothing and must not click either.
+            try
+            {
+                saveAnnounced?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "Disk buffer save feedback failed");
+            }
+
             await _saveLock.WaitAsync();
 
             DateTime requestedAt = DateTime.Now;
