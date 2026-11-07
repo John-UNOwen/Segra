@@ -252,10 +252,15 @@ namespace Segra.Backend.Recorder
         ///
         /// The probe waits on the muxer closing each file, which can take seconds, so it runs with no
         /// lock held, and a candidate that has left the ledger in the meantime is skipped.
+        ///
+        /// A candidate the selection throws away is media missing from the saved file, so it is handed
+        /// to the caller through dropped (when the caller wants it): a bookmark recorded after that hole
+        /// has to be moved back over the footage that is not in the output.
         /// </summary>
         public async Task<List<DiskBufferSegment>> SelectSaveWindowAsync(
             DateTime windowStart,
-            Func<DiskBufferSegment, Task<long?>> sizeProbe)
+            Func<DiskBufferSegment, Task<long?>> sizeProbe,
+            List<DiskBufferSegment>? dropped = null)
         {
             List<DiskBufferSegment> overlapping;
             lock (_lock)
@@ -274,10 +279,14 @@ namespace Segra.Backend.Recorder
             {
                 long? size = await sizeProbe(segment);
                 if (size == null)
+                {
+                    dropped?.Add(segment);
                     continue;
+                }
                 if (size.Value < MinSegmentBytes)
                 {
                     Log.Information($"Skipping disk segment from the save (stub, {size.Value} B): {segment.Path}");
+                    dropped?.Add(segment);
                     continue;
                 }
 

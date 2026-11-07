@@ -103,6 +103,47 @@ namespace Segra.Tests.Recorder
         }
 
         [Fact]
+        public async Task TheSelectionReportsTheSegmentsItThrewAway()
+        {
+            // A segment the selection drops is media that will be missing from the concatenated file:
+            // the save has to know its span, or every bookmark recorded after the hole lands late by
+            // exactly that span. Same recording as the stub test - the file opened at +30 is the
+            // 1,018,129 B remnant a forced split leaves.
+            var ledger = Recording(lastBoundaryOffset: 40);
+            var dropped = new List<DiskBufferSegment>();
+
+            var selected = await ledger.SelectSaveWindowAsync(
+                T0.AddSeconds(-80),
+                segment => Task.FromResult<long?>(segment.Path == SegmentName(30) ? 1_018_129L : 10_485_761L),
+                dropped);
+
+            Assert.Equal(new[] { SegmentName(0), SegmentName(10), SegmentName(20) }, CandidatePaths(selected));
+            Assert.Equal(new[] { SegmentName(30) }, CandidatePaths(dropped));
+
+            // The dropped entry is reported with the wall-clock span the ledger gave it, which is the
+            // hole in the saved file.
+            Assert.Equal(T0.AddSeconds(30), dropped[0].StartedAt);
+            Assert.Equal(T0.AddSeconds(40), dropped[0].EndedAt);
+        }
+
+        [Fact]
+        public async Task ASegmentTheSaveCouldNotReadIsReportedToo()
+        {
+            // A candidate whose file cannot be probed never reaches the concat list either, so its
+            // footage is missing from the output just like a stub's.
+            var ledger = Recording(lastBoundaryOffset: 40);
+            var dropped = new List<DiskBufferSegment>();
+
+            var selected = await ledger.SelectSaveWindowAsync(
+                T0.AddSeconds(-80),
+                segment => Task.FromResult<long?>(segment.Path == SegmentName(10) ? null : 10_485_761L),
+                dropped);
+
+            Assert.Equal(new[] { SegmentName(0), SegmentName(20), SegmentName(30) }, CandidatePaths(selected));
+            Assert.Equal(new[] { SegmentName(10) }, CandidatePaths(dropped));
+        }
+
+        [Fact]
         public async Task ASavePinsTheSegmentsItIsReadingAndReleasesThemAfterwards()
         {
             var ledger = Recording(lastBoundaryOffset: 40);
