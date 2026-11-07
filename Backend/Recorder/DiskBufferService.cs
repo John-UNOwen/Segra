@@ -42,15 +42,14 @@ namespace Segra.Backend.Recorder
         private static DateTime? _lastSaveEnd;
         private static TaskCompletionSource<string>? _splitSignaled;
         private static int _ffmpegProcessSeq;
-        private static int _saveActive;
 
         public static bool IsActive => _output != null && _ledger != null;
 
         /// <summary>
-        /// True while a save holds the save lock. Pinned segments cannot be pruned during a save, so
-        /// the rolling window stops reclaiming space for its duration.
+        /// True while a save holds the ledger. Pinned segments cannot be pruned during a save, so the
+        /// rolling window stops reclaiming space for its duration.
         /// </summary>
-        public static bool IsSaving => Volatile.Read(ref _saveActive) == 1;
+        public static bool IsSaving => _ledger?.HasSaveLease ?? false;
 
         /// <summary>
         /// Bytes per second pruning reclaimed during the disk monitor's last sampling interval, or 0
@@ -300,7 +299,7 @@ namespace Segra.Backend.Recorder
                     connection = _fileChangedConnection;
                     _fileChangedConnection = null;
                     _output = null;
-                    _ledger = null;
+                    _ledger?.MarkGone();
                 }
                 if (connection != null)
                 {
@@ -341,13 +340,15 @@ namespace Segra.Backend.Recorder
         }
 
         /// <summary>
-        /// Builds a saved replay: forces the current segment to close, selects the closed segments
-        /// covering the window (since the previous save when DiskBufferSaveSinceLastSave is on,
-        /// otherwise the full buffer duration), and stream-copies them into one mp4, assembled in the
-        /// segment folder and moved into Replay Buffers only after ffmpeg succeeded. Returns the
-        /// output path, the wall-clock save instant and a bookmark position resolver; null when
-        /// nothing could be saved or ffmpeg failed (user is informed here, sidecars are OBSService's
-        /// job). Recording keeps running throughout.
+        /// Builds a saved replay: takes a save lease from the ledger (a recording that is stopping or
+        /// gone is refused, with the reason, before anything is announced to the frontend), forces the
+        /// current segment to close, selects the closed segments covering the window (since the previous
+        /// save when DiskBufferSaveSinceLastSave is on, otherwise the full buffer duration), and
+        /// stream-copies them into one mp4, assembled in the segment folder and moved into Replay
+        /// Buffers only after ffmpeg succeeded. Returns the output path, the wall-clock save instant and
+        /// a bookmark position resolver; null when the save was refused, nothing could be saved or
+        /// ffmpeg failed (user is informed here, sidecars are OBSService's job). Recording keeps
+        /// running throughout.
         /// </summary>
         public static async Task<DiskBufferSaveResult?> SaveAsync()
         {
@@ -358,9 +359,25 @@ namespace Segra.Backend.Recorder
                 return null;
             }
 
+            // Ask the ledger for permission before announcing anything: a save that arrives after a
+            // stop began queues behind the save that stop is waiting for, and by the time it runs the
+            // ledger has been cleared. Announcing it first made the frontend play the save flash and
+            // then report a buffer that had never written a segment, for a window that was full a few
+            // seconds earlier.
+            if (!ledger.TryAcquireSaveLease(out DiskBufferSaveBlockReason blocked))
+            {
+                string reason = blocked switch
+                {
+                    DiskBufferSaveBlockReason.Stopping => "the recording is stopping",
+                    _ => "the recording has stopped",
+                };
+                Log.Warning($"Cannot save disk buffer: {reason}.");
+                await MessageService.ShowModal("Replay Save Failed", $"The replay was not saved because {reason}.", "error");
+                return null;
+            }
+
             _ = MessageService.SendFrontendMessage("ReplayBufferSaveStarted", new { });
             await _saveLock.WaitAsync();
-            Volatile.Write(ref _saveActive, 1);
 
             DateTime requestedAt = DateTime.Now;
             List<DiskBufferSegment> selected = new();
@@ -536,7 +553,7 @@ namespace Segra.Backend.Recorder
                     DeleteQuietly(concatPath);
                 if (!succeeded)
                     DeleteQuietly(stagedPath);
-                Volatile.Write(ref _saveActive, 0);
+                ledger.ReleaseSaveLease();
                 _saveLock.Release();
             }
         }

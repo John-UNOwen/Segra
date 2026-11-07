@@ -187,6 +187,42 @@ namespace Segra.Tests.Recorder
             Assert.Equal(200_000d, ledger.EstimateReclaimedBytesPerSecond(T0.AddSeconds(460), MonitorInterval), 3);
         }
 
+        [Fact]
+        public void ASaveLeaseTakenBeforeAStopSurvivesIt()
+        {
+            var ledger = Recording();
+
+            // The save already running holds a lease it took while the recording was live.
+            Assert.True(ledger.TryAcquireSaveLease(out _));
+
+            // A stop waits for that save instead of pulling it out of the ledger: its segments stay
+            // accounted for, pinned, and the save keeps its permission until it finishes.
+            ledger.RequestStop();
+            Assert.True(ledger.HasSaveLease);
+
+            ledger.ReleaseSaveLease();
+            Assert.False(ledger.HasSaveLease);
+        }
+
+        [Fact]
+        public void ASaveQueuedBehindAStopIsRefusedForTheReasonItActuallyFailedFor()
+        {
+            var ledger = Recording();
+
+            // A save that arrives after a stop began has nothing to write. The ledger says why before
+            // the save tells the frontend anything, so the buffer cannot be blamed for a window it
+            // had a full second ago.
+            ledger.RequestStop();
+            Assert.False(ledger.TryAcquireSaveLease(out DiskBufferSaveBlockReason stoppingReason));
+            Assert.Equal(DiskBufferSaveBlockReason.Stopping, stoppingReason);
+
+            // Once the output has been torn down the answer is a different one: nothing is finishing,
+            // the recording is simply over.
+            ledger.MarkGone();
+            Assert.False(ledger.TryAcquireSaveLease(out DiskBufferSaveBlockReason goneReason));
+            Assert.Equal(DiskBufferSaveBlockReason.Stopped, goneReason);
+        }
+
         private static void PruneOne(DiskBufferLedger ledger, DateTime now, long freedBytes)
         {
             var offered = ledger.CollectPrunable(now);

@@ -6,6 +6,18 @@ using Serilog;
 namespace Segra.Backend.Recorder
 {
     /// <summary>
+    /// Why a save was not allowed to run. The two answers are different problems: a recording that is
+    /// stopping still has a save finishing in front of it, and one whose output has been torn down has
+    /// no footage left to concatenate at all.
+    /// </summary>
+    internal enum DiskBufferSaveBlockReason
+    {
+        None,
+        Stopping,
+        Stopped
+    }
+
+    /// <summary>
     /// One mkv file the rolling disk buffer wrote. Times are wall clock: the segment runs from its
     /// start until the next segment starts (OBS's file_changed is what closes it), so a span is never
     /// derived from EndedAt - StartedAt.
@@ -46,6 +58,8 @@ namespace Segra.Backend.Recorder
         private long _sampleBytes;
         private double _lastSampleRate;
         private bool _stopping;
+        private bool _gone;
+        private int _saveLeases;
 
         public DiskBufferLedger(int windowSeconds) => _windowSeconds = windowSeconds;
 
@@ -53,19 +67,50 @@ namespace Segra.Backend.Recorder
         public int WindowSeconds => _windowSeconds;
 
         /// <summary>
-        /// A stop has been requested for this recording. The output is not closed yet - a stop waits
-        /// for an in-flight save - and OBS keeps splitting files until it is, so the ledger keeps
-        /// taking boundaries while stopping.
+        /// Marks the recording as stopping. The output is not closed yet - a stop waits for an
+        /// in-flight save - and OBS keeps splitting files until it is, so the ledger keeps taking
+        /// boundaries while stopping.
         /// </summary>
-        public bool IsStopping
-        {
-            get { lock (_lock) return _stopping; }
-        }
-
-        /// <summary>Marks the recording as stopping; segments keep being tracked until Clear().</summary>
         public void RequestStop()
         {
             lock (_lock) _stopping = true;
+        }
+
+        /// <summary>A save holds the ledger's permission to write a replay.</summary>
+        public bool HasSaveLease
+        {
+            get { lock (_lock) return _saveLeases > 0; }
+        }
+
+        /// <summary>
+        /// Permission to run a save. A save asks for it before it announces itself anywhere: a
+        /// recording that is stopping has a save already in front of it, and one whose output has been
+        /// torn down has nothing left to concatenate. A lease taken before a stop is honoured - the
+        /// stop waits for that save and its segments stay accounted for while it runs.
+        /// </summary>
+        public bool TryAcquireSaveLease(out DiskBufferSaveBlockReason blocked)
+        {
+            lock (_lock)
+            {
+                blocked = _gone
+                    ? DiskBufferSaveBlockReason.Stopped
+                    : _stopping ? DiskBufferSaveBlockReason.Stopping : DiskBufferSaveBlockReason.None;
+                if (blocked != DiskBufferSaveBlockReason.None)
+                    return false;
+
+                _saveLeases++;
+                return true;
+            }
+        }
+
+        /// <summary>The save is done; the segments it pinned are released with it.</summary>
+        public void ReleaseSaveLease()
+        {
+            lock (_lock)
+            {
+                if (_saveLeases > 0)
+                    _saveLeases--;
+            }
         }
 
         /// <summary>
@@ -259,11 +304,17 @@ namespace Segra.Backend.Recorder
             }
         }
 
-        /// <summary>Drops every entry: the recording's segments are gone with the output.</summary>
-        public void Clear()
+        /// <summary>
+        /// The output has been torn down: there is no recording left to save from, and no segments left
+        /// to prune. Tracked boundaries stop here because there are no more boundaries.
+        /// </summary>
+        public void MarkGone()
         {
             lock (_lock)
+            {
+                _gone = true;
                 _segments.Clear();
+            }
         }
 
         private DiskBufferSegment? Find(string path)

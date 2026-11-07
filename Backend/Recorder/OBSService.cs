@@ -238,8 +238,8 @@ namespace Segra.Backend.Recorder
         {
             if (DiskBufferService.IsActive)
             {
-                // Disk saves assemble the file from segments instead of asking OBS; SaveAsync
-                // sends the "ReplayBufferSaveStarted" message itself.
+                // Disk saves assemble the file from segments instead of asking OBS; SaveAsync sends
+                // the "ReplayBufferSaveStarted" message itself, once the ledger has allowed the save.
                 _ = Task.Run(SaveDiskBufferReplay);
                 _ = Task.Run(() => PlatformServices.Sound.Play(Properties.Resources.bookmark, Settings.Instance.SoundEffectsVolume));
                 return;
