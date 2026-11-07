@@ -44,7 +44,6 @@ namespace Segra.Backend.Recorder
         private static string _segmentFolder = "";
         private static string _gameFolderName = "";
         private static DateTime? _lastSaveEnd;
-        private static bool _stopping;
         private static TaskCompletionSource<string>? _splitSignaled;
         private static int _ffmpegProcessSeq;
         private static int _saveActive;
@@ -105,7 +104,6 @@ namespace Segra.Backend.Recorder
                 _gameFolderName = gameFolderName;
                 _ledger = new DiskBufferLedger(durationSec);
                 _lastSaveEnd = null;
-                _stopping = false;
 
                 _segmentFolder = PathUtils.Combine(ResolvedRoot(), gameFolderName);
                 try
@@ -199,22 +197,16 @@ namespace Segra.Backend.Recorder
                     if (ledger == null)
                         return;
 
-                    if (_stopping)
-                    {
-                        // Stop() emits an extra file_changed whose "next file" is the unsaveable
-                        // trailing stub; keep it out of the ledger.
-                        Log.Debug("Disk buffer file_changed while stopping; trailing segment not added");
-                    }
-                    else
-                    {
-                        ledger.RecordBoundary(now, next);
+                    // The output stays open until the stop has closed it, so a boundary that lands
+                    // while stopping is still recorded: the save's 1 MiB floor and the seg_*.mkv marker
+                    // the purge deletes by are what keep Stop()'s trailing stub harmless.
+                    ledger.RecordBoundary(now, next);
 
-                        TaskCompletionSource<string>? tcs = _splitSignaled;
-                        if (tcs != null)
-                        {
-                            _splitSignaled = null;
-                            tcs.TrySetResult(next ?? "");
-                        }
+                    TaskCompletionSource<string>? tcs = _splitSignaled;
+                    if (tcs != null)
+                    {
+                        _splitSignaled = null;
+                        tcs.TrySetResult(next ?? "");
                     }
 
                     pruneCandidates = ledger.CollectPrunable(now);
@@ -285,7 +277,7 @@ namespace Segra.Backend.Recorder
             {
                 if (_output == null)
                     return;
-                _stopping = true;
+                _ledger?.RequestStop();
                 output = _output;
                 segmentFolder = _segmentFolder;
             }
@@ -353,7 +345,7 @@ namespace Segra.Backend.Recorder
             {
                 if (_output == null)
                     return;
-                _stopping = true;
+                _ledger?.RequestStop();
                 try { _output.ForceStop(); } catch (Exception ex) { Log.Warning(ex, "Disk buffer output ForceStop threw"); }
             }
         }

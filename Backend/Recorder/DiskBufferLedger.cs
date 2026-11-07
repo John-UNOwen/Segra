@@ -36,11 +36,28 @@ namespace Segra.Backend.Recorder
 
         private DateTime? _firstReclaimAt;
         private long _reclaimedBytes;
+        private bool _stopping;
 
         public DiskBufferLedger(int windowSeconds) => _windowSeconds = windowSeconds;
 
         /// <summary>Buffer window in seconds; pruning keeps window + one segment of footage.</summary>
         public int WindowSeconds => _windowSeconds;
+
+        /// <summary>
+        /// A stop has been requested for this recording. The output is not closed yet - a stop waits
+        /// for an in-flight save - and OBS keeps splitting files until it is, so the ledger keeps
+        /// taking boundaries while stopping.
+        /// </summary>
+        public bool IsStopping
+        {
+            get { lock (_lock) return _stopping; }
+        }
+
+        /// <summary>Marks the recording as stopping; segments keep being tracked until Clear().</summary>
+        public void RequestStop()
+        {
+            lock (_lock) _stopping = true;
+        }
 
         /// <summary>Total bytes pruning has deleted for this recording.</summary>
         public long ReclaimedBytes
@@ -69,7 +86,10 @@ namespace Segra.Backend.Recorder
 
         /// <summary>
         /// OBS closed the file it was writing and opened nextPath at the same instant: the newest open
-        /// segment ends at now and nextPath becomes the new open segment.
+        /// segment ends at now and nextPath becomes the new open segment. This is tracked while
+        /// stopping as well: a stop waits for an in-flight save before it closes the output, and the
+        /// segments OBS split in the meantime are invisible to pruning and to the teardown unless they
+        /// are in the ledger.
         /// </summary>
         public void RecordBoundary(DateTime now, string? nextPath)
         {

@@ -97,6 +97,52 @@ namespace Segra.Tests.Recorder
             Assert.Equal(new[] { SegmentName(10), SegmentName(20) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
         }
 
+        [Fact]
+        public void BoundariesKeepBeingTrackedWhileRecordingStops()
+        {
+            // A stop waits up to 15 minutes for an in-flight save and OBS keeps splitting files into the
+            // folder the whole time. Those boundaries have to reach the ledger, or the files they
+            // describe are invisible to pruning and to the teardown that has to account for them.
+            var ledger = Recording();
+            ledger.RequestStop();
+
+            ledger.RecordBoundary(T0.AddSeconds(40), SegmentName(40));
+            ledger.RecordBoundary(T0.AddSeconds(50), SegmentName(50));
+
+            var segments = ledger.Segments;
+            Assert.Equal(6, segments.Count);
+            Assert.Equal(T0.AddSeconds(40), segments[3].EndedAt);
+            Assert.Equal(SegmentName(40), segments[4].Path);
+            Assert.Equal(T0.AddSeconds(50), segments[4].EndedAt);
+            Assert.Null(segments[5].EndedAt);
+
+            // Everything that has left the window is still prunable, including what arrived while
+            // stopping. The trailing file OBS emits when the output closes is the newest entry and
+            // pruning leaves it alone.
+            Assert.Equal(
+                new[] { SegmentName(0), SegmentName(10), SegmentName(20), SegmentName(30), SegmentName(40) },
+                CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
+        }
+
+        [Fact]
+        public void ASaveOnlyPinsTheSegmentsItActuallyWrites()
+        {
+            // A window ending at +40 with nothing saved before it, so every closed file overlaps it.
+            // The one opened at +30 is the 1,018,129 B remnant a forced split leaves behind, which is
+            // under the 1 MiB floor a selection applies.
+            var ledger = Recording(lastBoundaryOffset: 40);
+            var selected = ledger.SelectSaveWindow(
+                T0.AddSeconds(40),
+                TimeSpan.FromSeconds(WindowSeconds),
+                sinceLastSave: null,
+                sizeProbe: segment => segment.Path == SegmentName(30) ? 1_018_129L : 10_485_761L);
+
+            Assert.Equal(new[] { SegmentName(0), SegmentName(10), SegmentName(20) }, CandidatePaths(selected));
+
+            // A segment the save dropped is not held: pruning keeps reclaiming it for the whole save.
+            Assert.Equal(new[] { SegmentName(30) }, CandidatePaths(ledger.CollectPrunable(T0.AddSeconds(4000))));
+        }
+
         private static string[] CandidatePaths(IEnumerable<DiskBufferSegment> segments)
         {
             var paths = new List<string>();
