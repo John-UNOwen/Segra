@@ -16,16 +16,10 @@ namespace Segra.Backend.App
     public static class UpdateService
     {
         public static UpdateInfo? LatestUpdateInfo { get; private set; } = null;
+        // The upstream feed. BuildProvenance decides whether any update path may use it at all.
         public static GithubSource Source = new("https://github.com/Segergren/Segra", null, false);
         public static GithubSource BetaSource = new("https://github.com/Segergren/Segra", null, true);
         public static UpdateManager UpdateManager { get; private set; } = new(Source);
-
-#if LOCAL_BUILD || NO_UPSTREAM_AUTO_UPDATE
-        // Also covers this fork: upstream releases would overwrite it, so no update path runs at all.
-        private static readonly bool IsLocalBuild = true;
-#else
-        private static readonly bool IsLocalBuild = false;
-#endif
 
         // Falls back to the assembly version when Velopack has no metadata (dev builds, Flatpak).
         public static NuGet.Versioning.SemanticVersion GetCurrentVersion()
@@ -97,7 +91,7 @@ namespace Segra.Backend.App
 
         public static async Task<bool> UpdateAppIfNecessary(bool forceCheck = false)
         {
-            if (IsLocalBuild)
+            if (!BuildProvenance.UpdateFeedIsUsable)
             {
                 Log.Information("Skipping update check: local build");
                 return false;
@@ -319,8 +313,17 @@ namespace Segra.Backend.App
             }
         }
 
+        // The one answer to "may this build replace itself with a build fetched from a feed" is
+        // BuildProvenance.UpdateFeedIsUsable, and it guards every path, not only the startup check:
+        // the OBS version change path calls ForceReinstallCurrentVersionAsync directly.
         public static async Task<bool> ForceReinstallCurrentVersionAsync(CancellationToken ct = default)
         {
+            if (!BuildProvenance.UpdateFeedIsUsable)
+            {
+                Log.Information("Skipping forced reinstall: local build");
+                return false;
+            }
+
             await _updateGate.WaitAsync(ct);
             try
             {
