@@ -18,9 +18,9 @@ namespace Segra.Backend.Recorder
     /// <summary>
     /// Replay-buffer semantics with the footage on disk instead of in RAM. OBSService creates and
     /// configures the mkv RecordingOutput; this service attaches OBS's file splitting (fixed
-    /// segments), keeps a ledger of segments with their wall-clock start/end times, prunes segments
-    /// once they fall outside the buffer window, and builds a saved replay by stream-copying the
-    /// segments that cover the requested window through the ffmpeg concat demuxer.
+    /// segments), drives the segment ledger (DiskBufferLedger) that records each boundary, prunes
+    /// segments once they fall outside the buffer window, and builds a saved replay by stream-copying
+    /// the segments that cover the requested window through the ffmpeg concat demuxer.
     /// The file_changed signal runs on an OBS thread, so it only updates the ledger and hands any
     /// file deletion to a background task.
     /// </summary>
@@ -36,23 +36,20 @@ namespace Segra.Backend.Recorder
 
         private static readonly object _lock = new();
         private static readonly SemaphoreSlim _saveLock = new(1, 1);
-        private static readonly List<Segment> _segments = new();
 
+        private static DiskBufferLedger? _ledger;
         private static RecordingOutput? _output;
         private static SignalConnection? _fileChangedConnection;
 
         private static string _segmentFolder = "";
         private static string _gameFolderName = "";
-        private static int _durationSec;
         private static DateTime? _lastSaveEnd;
-        private static DateTime? _firstPruneAt;
-        private static long _prunedBytes;
         private static bool _stopping;
         private static TaskCompletionSource<string>? _splitSignaled;
         private static int _ffmpegProcessSeq;
         private static int _saveActive;
 
-        public static bool IsActive => _output != null;
+        public static bool IsActive => _output != null && _ledger != null;
 
         /// <summary>
         /// True while a save holds the save lock. Pinned segments cannot be pruned during a save, so
@@ -67,31 +64,21 @@ namespace Segra.Backend.Recorder
         /// </summary>
         public static double EstimateReclaimedBytesPerSecond()
         {
-            lock (_lock)
-            {
-                if (_firstPruneAt == null || _prunedBytes <= 0)
-                    return 0;
+            DiskBufferLedger? ledger = _ledger;
+            DateTime? firstReclaim = ledger?.FirstReclaimAt;
+            long reclaimedBytes = ledger?.ReclaimedBytes ?? 0;
 
-                double seconds = (DateTime.Now - _firstPruneAt.Value).TotalSeconds;
-                return seconds > 0 ? _prunedBytes / seconds : 0;
-            }
+            if (firstReclaim == null || reclaimedBytes <= 0)
+                return 0;
+
+            double seconds = (DateTime.Now - firstReclaim.Value).TotalSeconds;
+            return seconds > 0 ? reclaimedBytes / seconds : 0;
         }
 
         internal sealed record DiskBufferSaveResult(
             string OutputPath,
             DateTime RequestedAt,
             Func<DateTime, TimeSpan> BookmarkPositionFor);
-
-        private sealed class Segment
-        {
-            public Segment(string path) => Path = path;
-
-            public string Path { get; }
-            public DateTime StartedAt { get; set; }
-            public DateTime? EndedAt { get; set; }
-            public int Pins { get; set; }
-            public bool DeletePending { get; set; }
-        }
 
         /// <summary>
         /// Folder holding the per-game segment folders: the configured DiskBufferFolder, or
@@ -116,12 +103,9 @@ namespace Segra.Backend.Recorder
                 }
 
                 _gameFolderName = gameFolderName;
-                _durationSec = durationSec;
+                _ledger = new DiskBufferLedger(durationSec);
                 _lastSaveEnd = null;
-                _firstPruneAt = null;
-                _prunedBytes = 0;
                 _stopping = false;
-                _segments.Clear();
 
                 _segmentFolder = PathUtils.Combine(ResolvedRoot(), gameFolderName);
                 try
@@ -177,7 +161,7 @@ namespace Segra.Backend.Recorder
                 _output = output;
                 string? path = output.Path;
                 if (!string.IsNullOrEmpty(path))
-                    _segments.Add(new Segment(PathUtils.Normalize(path)) { StartedAt = DateTime.Now });
+                    _ledger?.Seed(PathUtils.Normalize(path), DateTime.Now);
                 Log.Information($"Disk buffer recording started to {_segmentFolder}; first segment: {path ?? "unknown"}");
             }
             return true;
@@ -191,7 +175,7 @@ namespace Segra.Backend.Recorder
                 connection = _fileChangedConnection;
                 _fileChangedConnection = null;
                 _output = null;
-                _segments.Clear();
+                _ledger = null;
             }
             if (connection != null)
             {
@@ -208,9 +192,13 @@ namespace Segra.Backend.Recorder
                 try { next = Calldata.GetString(calldata, "next_file"); } catch { /* keep null */ }
 
                 DateTime now = DateTime.Now;
-                List<Segment> pruneCandidates;
+                List<DiskBufferSegment> pruneCandidates;
                 lock (_lock)
                 {
+                    DiskBufferLedger? ledger = _ledger;
+                    if (ledger == null)
+                        return;
+
                     if (_stopping)
                     {
                         // Stop() emits an extra file_changed whose "next file" is the unsaveable
@@ -219,16 +207,7 @@ namespace Segra.Backend.Recorder
                     }
                     else
                     {
-                        for (int i = _segments.Count - 1; i >= 0; i--)
-                        {
-                            if (_segments[i].EndedAt == null)
-                            {
-                                _segments[i].EndedAt = now;
-                                break;
-                            }
-                        }
-                        if (!string.IsNullOrEmpty(next))
-                            _segments.Add(new Segment(PathUtils.Normalize(next)) { StartedAt = now });
+                        ledger.RecordBoundary(now, next);
 
                         TaskCompletionSource<string>? tcs = _splitSignaled;
                         if (tcs != null)
@@ -238,7 +217,7 @@ namespace Segra.Backend.Recorder
                         }
                     }
 
-                    pruneCandidates = CollectPrunable(now);
+                    pruneCandidates = ledger.CollectPrunable(now);
                 }
 
                 Log.Debug($"Disk buffer segment boundary at {now:HH:mm:ss.fff}; next file: {next ?? "none"}");
@@ -252,33 +231,16 @@ namespace Segra.Backend.Recorder
         }
 
         /// <summary>
-        /// Closed segments older than the buffer window (+ one segment for OBS's late cuts) with no
-        /// pins and not the newest ledger entry. Caller holds _lock; marking DeletePending here is
-        /// what deduplicates concurrent delete attempts.
+        /// Deletes the segments the ledger offered and accounts the space they gave back. Runs on a
+        /// background task: a segment the muxer or a reader still holds is put back for the next
+        /// boundary instead of blocking the OBS thread.
         /// </summary>
-        private static List<Segment> CollectPrunable(DateTime now)
+        private static void DeleteSegments(List<DiskBufferSegment> segments)
         {
-            TimeSpan window = TimeSpan.FromSeconds(_durationSec + SegmentSeconds);
-            var candidates = new List<Segment>();
-            for (int i = 0; i < _segments.Count - 1; i++)
-            {
-                Segment segment = _segments[i];
-                if (segment.EndedAt == null || segment.Pins > 0 || segment.DeletePending)
-                    continue;
-                if (now - segment.EndedAt.Value > window)
-                {
-                    segment.DeletePending = true;
-                    candidates.Add(segment);
-                }
-            }
-            return candidates;
-        }
-
-        private static void DeleteSegments(List<Segment> segments)
-        {
+            DiskBufferLedger? ledger = _ledger;
             int deleted = 0;
             long freedBytes = 0;
-            foreach (Segment segment in segments)
+            foreach (DiskBufferSegment segment in segments)
             {
                 try
                 {
@@ -289,11 +251,7 @@ namespace Segra.Backend.Recorder
                         size = info.Length;
                         File.Delete(segment.Path);
                     }
-                    lock (_lock)
-                    {
-                        _segments.Remove(segment);
-                        segment.DeletePending = false;
-                    }
+                    ledger?.AccountReclaim(segment, size, DateTime.Now);
                     deleted++;
                     freedBytes += size;
                     Log.Debug($"Deleted disk buffer segment {segment.Path} ({size} bytes)");
@@ -301,23 +259,16 @@ namespace Segra.Backend.Recorder
                 catch (IOException)
                 {
                     // Segment file is still open (mux closing or a reader); retry on the next event.
-                    lock (_lock) segment.DeletePending = false;
+                    ledger?.RetryPrune(segment.Path);
                 }
                 catch (Exception ex)
                 {
                     Log.Warning(ex, $"Failed to delete disk buffer segment {segment.Path}");
-                    lock (_lock) segment.DeletePending = false;
+                    ledger?.RetryPrune(segment.Path);
                 }
             }
             if (deleted > 0)
-            {
-                lock (_lock)
-                {
-                    _firstPruneAt ??= DateTime.Now;
-                    _prunedBytes += freedBytes;
-                }
                 Log.Information($"Pruned {deleted} disk buffer segment(s), {freedBytes / (1024.0 * 1024.0):F1} MB reclaimed");
-            }
         }
 
         /// <summary>
@@ -367,7 +318,7 @@ namespace Segra.Backend.Recorder
                     connection = _fileChangedConnection;
                     _fileChangedConnection = null;
                     _output = null;
-                    _segments.Clear();
+                    _ledger = null;
                 }
                 if (connection != null)
                 {
@@ -418,7 +369,8 @@ namespace Segra.Backend.Recorder
         /// </summary>
         public static async Task<DiskBufferSaveResult?> SaveAsync()
         {
-            if (!IsActive)
+            DiskBufferLedger? ledger = _ledger;
+            if (!IsActive || ledger == null)
             {
                 Log.Warning("Cannot save disk buffer: disk buffer is not active");
                 return null;
@@ -429,8 +381,8 @@ namespace Segra.Backend.Recorder
             Volatile.Write(ref _saveActive, 1);
 
             DateTime requestedAt = DateTime.Now;
-            List<Segment> pinned = new();
-            List<Segment> selected = new();
+            List<DiskBufferSegment> pinned = new();
+            List<DiskBufferSegment> selected = new();
             string? concatPath = null;
             string? outputPath = null;
             string? stagedPath = null;
@@ -466,24 +418,18 @@ namespace Segra.Backend.Recorder
                 DateTime windowStart;
                 lock (_lock)
                 {
-                    windowStart = requestedAt - TimeSpan.FromSeconds(_durationSec);
+                    windowStart = requestedAt - TimeSpan.FromSeconds(ledger.WindowSeconds);
                     if (Settings.Instance.DiskBufferSaveSinceLastSave && _lastSaveEnd.HasValue && _lastSaveEnd.Value > windowStart)
                         windowStart = _lastSaveEnd.Value;
-
-                    // A closed segment overlaps the window when it ended after the window opened.
-                    // The newest (open) segment is still being written and is never saveable.
-                    foreach (Segment segment in _segments)
-                    {
-                        if (segment.EndedAt == null || segment.EndedAt.Value <= windowStart)
-                            continue;
-                        segment.Pins++;
-                        pinned.Add(segment);
-                    }
                 }
+
+                // A closed segment overlaps the window when it ended after the window opened.
+                // The newest (open) segment is still being written and is never saveable.
+                pinned = ledger.PinOverlapping(windowStart);
 
                 // EnsureFileReady may block for seconds; pinned segments are protected from pruning
                 // while this runs.
-                foreach (Segment segment in pinned)
+                foreach (DiskBufferSegment segment in pinned)
                 {
                     try
                     {
@@ -542,7 +488,7 @@ namespace Segra.Backend.Recorder
                 // Playable content the window actually contributes, for the progress estimate and
                 // for deriving the per-junction padding used by the bookmark resolver.
                 TimeSpan contentSpan = TimeSpan.Zero;
-                foreach (Segment segment in selected)
+                foreach (DiskBufferSegment segment in selected)
                 {
                     DateTime from = segment.StartedAt > effectiveWindowStart ? segment.StartedAt : effectiveWindowStart;
                     DateTime to = segment.EndedAt!.Value < requestedAt ? segment.EndedAt.Value : requestedAt;
@@ -611,9 +557,8 @@ namespace Segra.Backend.Recorder
                 {
                     if (succeeded)
                         _lastSaveEnd = requestedAt;
-                    foreach (Segment segment in pinned)
-                        segment.Pins--;
                 }
+                ledger.Unpin(pinned);
                 if (concatPath != null)
                     DeleteQuietly(concatPath);
                 if (!succeeded)
@@ -643,7 +588,7 @@ namespace Segra.Backend.Recorder
         /// leave a post-save bookmark sitting at the end of the replay.
         /// </summary>
         private static Func<DateTime, TimeSpan> BuildBookmarkResolver(
-            List<Segment> selected,
+            List<DiskBufferSegment> selected,
             DateTime effectiveWindowStart,
             TimeSpan outputDuration,
             TimeSpan contentSpan)
@@ -656,7 +601,7 @@ namespace Segra.Backend.Recorder
             {
                 double position = (wallTime - effectiveWindowStart).TotalSeconds;
                 int junctions = 0;
-                foreach (Segment segment in selected)
+                foreach (DiskBufferSegment segment in selected)
                 {
                     if (segment.EndedAt != null && segment.EndedAt.Value <= wallTime)
                         junctions++;
