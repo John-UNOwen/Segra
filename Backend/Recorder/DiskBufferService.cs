@@ -45,6 +45,9 @@ namespace Segra.Backend.Recorder
 
         public static bool IsActive => _output != null && _ledger != null;
 
+        /// <summary>The buffer window the recording is keeping, in seconds; 0 when not recording.</summary>
+        public static int WindowSeconds => _ledger?.WindowSeconds ?? 0;
+
         /// <summary>
         /// True while a save holds the ledger. Pinned segments cannot be pruned during a save, so the
         /// rolling window stops reclaiming space for its duration.

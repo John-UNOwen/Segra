@@ -3946,19 +3946,26 @@ namespace Segra.Backend.Recorder
             return Math.Max(StorageService.MinimumRecordingFreeSpaceBytes, threshold);
         }
 
-        // Bytes the rolling disk buffer actually adds per check interval: the write rate minus what
-        // pruning reclaimed in the last interval, since the window is bounded. Before pruning has a
-        // completed interval to report, and while a save pins the segments, it keeps the full write
-        // rate, and a prune that stops working raises the headroom back up within one interval.
+        // What the disk monitor is working from at this instant.
+        private static DiskBufferMonitorSample DiskBufferMonitorSample(long intervalSeconds) =>
+            new(
+                EstimateRecordingBytesPerSecond(),
+                intervalSeconds,
+                DiskBufferService.EstimateReclaimedBytesPerSecond(TimeSpan.FromSeconds(intervalSeconds)),
+                DiskBufferService.WindowSeconds,
+                DiskBufferService.IsSaving);
+
+        // Bytes the rolling disk buffer actually adds per check interval, from DiskBufferSpacePolicy:
+        // the write rate less what pruning reclaimed in the last interval, and the full write rate
+        // while a save pins the footage. A prune that stops working raises the headroom back up
+        // within one interval.
         private static long GetDiskBufferGrowthBytesPerInterval(long intervalSeconds)
         {
-            long writeBytes = EstimateRecordingBytesPerSecond() * intervalSeconds;
-            if (DiskBufferService.IsSaving)
-                return writeBytes;
-
-            long reclaimedBytesPerInterval = (long)DiskBufferService.EstimateReclaimedBytesPerSecond(TimeSpan.FromSeconds(intervalSeconds)) * intervalSeconds;
-            Log.Debug($"Disk buffer monitor headroom: {writeBytes} B written per interval, {reclaimedBytesPerInterval} B reclaimed by pruning");
-            return Math.Max(0, writeBytes - reclaimedBytesPerInterval);
+            DiskBufferMonitorSample sample = DiskBufferMonitorSample(intervalSeconds);
+            long writeBytes = sample.WriteBytesPerSecond * intervalSeconds;
+            long growthBytes = DiskBufferSpacePolicy.GrowthBytesPerInterval(sample);
+            Log.Debug($"Disk buffer monitor headroom: {writeBytes} B written per interval, {writeBytes - growthBytes} B reclaimed by pruning");
+            return growthBytes;
         }
 
         // Disk buffer preflight: the whole rolling window at the estimated worst-case bitrate plus
