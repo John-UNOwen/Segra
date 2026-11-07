@@ -384,6 +384,7 @@ namespace Segra.Backend.Recorder
 
             DateTime requestedAt = DateTime.Now;
             List<DiskBufferSegment> selected = new();
+            List<DiskBufferSegment> dropped = new();
             string? concatPath = null;
             string? outputPath = null;
             string? stagedPath = null;
@@ -426,7 +427,9 @@ namespace Segra.Backend.Recorder
 
                 // Only the segments that reach the concat list are pinned; everything else, including
                 // a stub the selection dropped, keeps being reclaimed while the save runs. The probe
-                // waits on the muxer closing each file, which can take seconds.
+                // waits on the muxer closing each file, which can take seconds. A dropped segment is
+                // footage missing from the output, and the bookmark resolver needs its span to keep
+                // later bookmarks from sitting late by exactly that hole.
                 selected = await ledger.SelectSaveWindowAsync(windowStart, async segment =>
                 {
                     try
@@ -439,7 +442,7 @@ namespace Segra.Backend.Recorder
                         Log.Warning($"Skipping disk segment from the save ({ex.Message}): {segment.Path}");
                         return null;
                     }
-                });
+                }, dropped);
 
                 if (selected.Count == 0)
                 {
@@ -540,7 +543,8 @@ namespace Segra.Backend.Recorder
                 TimeSpan outputDuration = await FFmpegService.GetVideoDuration(outputPath);
                 Log.Information($"Disk buffer replay saved to: {outputPath} ({selected.Count} segments, {outputDuration.TotalSeconds:F1} s)");
 
-                Func<DateTime, TimeSpan> positionFor = BuildBookmarkResolver(selected, effectiveWindowStart, outputDuration, contentSpan);
+                Func<DateTime, TimeSpan> positionFor = new DiskBufferBookmarkResolver(
+                    selected, dropped, effectiveWindowStart, outputDuration, contentSpan).PositionFor;
                 succeeded = true;
                 return new DiskBufferSaveResult(outputPath, requestedAt, positionFor);
             }
@@ -559,49 +563,6 @@ namespace Segra.Backend.Recorder
                 ledger.ReleaseSaveLease();
                 _saveLock.Release();
             }
-        }
-
-        /// <summary>
-        /// Maps a bookmark's wall-clock time to its position inside the concatenated output.
-        ///
-        /// Stream-copy concat plays the segments back to back, but each junction between files
-        /// inserts dead timeline (measured ~19-25 ms per junction, ~4.5 s over 30 min) that counts
-        /// towards the output duration without adding playable content. The real padding per junction
-        /// is derived from the measured output:
-        ///   paddingPerJunction = max(0, (outputDuration - contentSpan) / (segmentCount - 1))
-        /// where contentSpan is the summed overlap of the selected segments with the window (the
-        /// first segment already trimmed by the inpoint). A bookmark recorded at wall time T crosses
-        /// the junctions of all selected segments that ended at or before T, so:
-        ///   position = (T - effectiveWindowStart) + paddingPerJunction * junctionsBefore(T)
-        /// effectiveWindowStart is the nominal inpoint cut; the real cut snaps to the previous
-        /// keyframe (up to 1 s early), which shifts early bookmarks by up to ~1 s - the measured
-        /// padding absorbs that into paddingPerJunction. The position is intentionally left
-        /// unclamped: bookmarks recorded outside the saved window come back negative or past the
-        /// file duration and are dropped by the caller's range filter; clamping here instead would
-        /// leave a post-save bookmark sitting at the end of the replay.
-        /// </summary>
-        private static Func<DateTime, TimeSpan> BuildBookmarkResolver(
-            List<DiskBufferSegment> selected,
-            DateTime effectiveWindowStart,
-            TimeSpan outputDuration,
-            TimeSpan contentSpan)
-        {
-            double paddingPerJunction = selected.Count > 1
-                ? Math.Max(0, (outputDuration - contentSpan).TotalSeconds) / (selected.Count - 1)
-                : 0;
-
-            return wallTime =>
-            {
-                double position = (wallTime - effectiveWindowStart).TotalSeconds;
-                int junctions = 0;
-                foreach (DiskBufferSegment segment in selected)
-                {
-                    if (segment.EndedAt != null && segment.EndedAt.Value <= wallTime)
-                        junctions++;
-                }
-                position += paddingPerJunction * junctions;
-                return TimeSpan.FromSeconds(position);
-            };
         }
 
         private static string GetUniqueFilePath(string path)

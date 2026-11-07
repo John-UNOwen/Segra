@@ -390,7 +390,7 @@ namespace Segra.Backend.Recorder
         /// ones integrations add later (e.g. Rainbow Six Siege after the round ends).
         /// positionFor maps a bookmark's wall-clock instant to its offset in the saved file; the
         /// default assumes the replay ends at endedAt, which holds for the RAM buffer but not for
-        /// the disk buffer's concatenated output (see DiskBufferService.BuildBookmarkResolver).
+        /// the disk buffer's concatenated output (see DiskBufferBookmarkResolver).
         /// </summary>
         private static async Task AddReplayBookmarks(Recording recording, string contentId, DateTime endedAt, Func<DateTime, TimeSpan>? positionFor = null)
         {
