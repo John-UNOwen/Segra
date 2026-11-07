@@ -7,33 +7,65 @@ Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Segra", "Segra.csproj", "{7
 EndProject
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Segra.Hotkeys", "HotkeyBroker\Segra.Hotkeys\Segra.Hotkeys.csproj", "{B2C3D4E5-0002-4A5B-8C9D-000000000002}"
 EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Backend", "Backend", "{1AE8ACA6-933B-BF2A-3671-3E2EAC007D16}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "Tests", "Tests", "{F57642F3-C37C-D174-720E-6A6AAD5BEE22}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Segra.Tests", "Backend\Tests\Segra.Tests\Segra.Tests.csproj", "{8BEE624E-77E6-4D96-8325-BBE51963A47F}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Debug|x64 = Debug|x64
+		Debug|x86 = Debug|x86
 		Release|Any CPU = Release|Any CPU
 		Release|x64 = Release|x64
+		Release|x86 = Release|x86
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Debug|x64.ActiveCfg = Debug|x64
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Debug|x64.Build.0 = Debug|x64
+		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Debug|x86.Build.0 = Debug|Any CPU
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Release|Any CPU.Build.0 = Release|Any CPU
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Release|x64.ActiveCfg = Release|x64
 		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Release|x64.Build.0 = Release|x64
+		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Release|x86.ActiveCfg = Release|Any CPU
+		{754FBF17-B609-4B2C-A214-317632AB6AAB}.Release|x86.Build.0 = Release|Any CPU
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Debug|Any CPU.ActiveCfg = Debug|x64
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Debug|Any CPU.Build.0 = Debug|x64
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Debug|x64.ActiveCfg = Debug|x64
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Debug|x64.Build.0 = Debug|x64
+		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Debug|x86.Build.0 = Debug|Any CPU
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Release|Any CPU.ActiveCfg = Release|x64
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Release|Any CPU.Build.0 = Release|x64
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Release|x64.ActiveCfg = Release|x64
 		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Release|x64.Build.0 = Release|x64
+		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Release|x86.ActiveCfg = Release|Any CPU
+		{B2C3D4E5-0002-4A5B-8C9D-000000000002}.Release|x86.Build.0 = Release|Any CPU
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Debug|Any CPU.ActiveCfg = Debug|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Debug|Any CPU.Build.0 = Debug|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Debug|x64.ActiveCfg = Debug|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Debug|x64.Build.0 = Debug|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Debug|x86.ActiveCfg = Debug|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Debug|x86.Build.0 = Debug|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Release|Any CPU.ActiveCfg = Release|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Release|Any CPU.Build.0 = Release|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Release|x64.ActiveCfg = Release|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Release|x64.Build.0 = Release|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Release|x86.ActiveCfg = Release|x64
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F}.Release|x86.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{F57642F3-C37C-D174-720E-6A6AAD5BEE22} = {1AE8ACA6-933B-BF2A-3671-3E2EAC007D16}
+		{8BEE624E-77E6-4D96-8325-BBE51963A47F} = {F57642F3-C37C-D174-720E-6A6AAD5BEE22}
 	EndGlobalSection
 	GlobalSection(ExtensibilityGlobals) = postSolution
 		SolutionGuid = {C27ADC7A-5C6E-495F-AE38-AAFB2AC23437}

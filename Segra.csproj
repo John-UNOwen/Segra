@@ -32,8 +32,9 @@
 
     <!-- Exclude leftover build output from the removed Inspector sub-project. Its generated
          AssemblyInfo.cs sits under this project folder and would otherwise be globbed into
-         this compilation, leaking a duplicate AssemblyVersion (and masking the real version). -->
-    <DefaultItemExcludes>$(DefaultItemExcludes);Inspector\**;HotkeyBroker\**</DefaultItemExcludes>
+         this compilation, leaking a duplicate AssemblyVersion (and masking the real version).
+         Backend\Tests is the test project; its sources belong to the test assembly only. -->
+    <DefaultItemExcludes>$(DefaultItemExcludes);Inspector\**;HotkeyBroker\**;Backend\Tests\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <!-- Windows-only build settings -->
@@ -135,6 +136,11 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows10.0.19041.0'">
     <Compile Include="HotkeyBroker\Segra.Hotkeys\HotkeyProtocol.cs" Link="HotkeyBroker\HotkeyProtocol.cs" />
     <Compile Include="HotkeyBroker\Segra.Hotkeys\Authenticode.cs" Link="HotkeyBroker\Authenticode.cs" />
+  </ItemGroup>
+
+  <!-- Tests reach the recorder seams (they are internal to the app by design). -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Segra.Tests" />
   </ItemGroup>
 
   <ItemGroup>
