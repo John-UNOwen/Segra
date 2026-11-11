@@ -290,6 +290,22 @@ export default function VideoSettingsSection({
                   </span>
                 </div>
               </div>
+
+              <label className="col-span-2 flex items-center gap-3 cursor-pointer p-3 bg-base-200 rounded-lg border border-base-400">
+                <input
+                  type="checkbox"
+                  className="checkbox checkbox-primary checkbox-sm"
+                  checked={settings.clearReplayBufferAfterSave}
+                  onChange={(e) => updateSettings({ clearReplayBufferAfterSave: e.target.checked })}
+                />
+                <div>
+                  <div className="font-semibold">Clear Buffer After Saving</div>
+                  <div className="text-sm opacity-70 mt-0.5">
+                    Each saved clip only contains footage since the last save. Turn off to always
+                    save the full buffer duration.
+                  </div>
+                </div>
+              </label>
             </motion.div>
           </motion.div>
         )}
@@ -394,15 +410,15 @@ export default function VideoSettingsSection({
             <label className="flex items-center gap-3 cursor-pointer p-3 bg-base-200 rounded-lg border border-base-400 mt-3">
               <input
                 type="checkbox"
-                checked={settings.diskBufferSaveSinceLastSave}
-                onChange={(e) => updateSettings({ diskBufferSaveSinceLastSave: e.target.checked })}
+                checked={settings.clearReplayBufferAfterSave}
+                onChange={(e) => updateSettings({ clearReplayBufferAfterSave: e.target.checked })}
                 className="checkbox checkbox-primary checkbox-sm"
               />
               <div>
-                <div className="font-semibold">Save Since Last Save</div>
+                <div className="font-semibold">Clear Buffer After Saving</div>
                 <div className="text-sm opacity-70 mt-0.5">
-                  Each save takes only the footage recorded since the previous save. Turn it off and
-                  every save takes the whole buffer window again.
+                  Each saved clip only contains footage since the last save. Turn off to always save
+                  the full buffer window. Shared with the replay buffer setting.
                 </div>
               </div>
             </label>

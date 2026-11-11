@@ -73,7 +73,8 @@ SplitFile() → wait for file_changed (the previous segment is now closed)
 2. **Separate settings** from the RAM buffer, so switching modes doesn't overwrite the RAM buffer length:
    - `DiskBufferDuration` (seconds, default **1800**, clamped to **30–1800**).
    - `DiskBufferFolder` (string, default `<ContentFolder>/.diskbuffer`).
-   - `DiskBufferSaveSinceLastSave` (bool, default **true**; see 5.4).
+   - `ClearReplayBufferAfterSave` (upstream's setting, default **true**; see 5.4). The disk buffer follows
+     it rather than carrying its own copy, so both buffer modes save the same way.
    - Segment length is an internal constant, `SegmentSeconds = 10`, not a user setting.
 3. **Segments are MKV via the plain `ffmpeg_muxer`, not Hybrid MP4.** File splitting is best tested on the ffmpeg muxer, MKV segments survive crashes, and MKV concatenates cleanly. If Phase 1 shows Hybrid MP4 splitting works just as well, it's acceptable, but MKV is the default.
 4. **10-second segments.** For 30 minutes that's about 180 files: fine on NTFS, and pruning overshoot stays under 10 s. Save latency doesn't depend on segment length, because a save forces a split.
@@ -117,7 +118,9 @@ Behind a temporary dev flag, start a `RecordingOutput` with `SetFormat(Recording
 Files: `Backend/Core/Models/Settings.cs`, `Backend/Core/SettingsService.cs`, `Backend/Games/GameSettingsService.cs`, `Frontend/src/Models/types.ts`.
 
 1. Add `DiskBuffer` to `enum RecordingMode`. It uses a JSON string converter, so check that existing settings files still load.
-2. Add `DiskBufferDuration`, `DiskBufferFolder` and `DiskBufferSaveSinceLastSave` to the settings model. Copy the existing pattern (backing field, `[JsonPropertyName]`, change logging in `SettingsService`). Clamp the duration to 30–1800 on set.
+2. Add `DiskBufferDuration` and `DiskBufferFolder` to the settings model. Copy the existing pattern (backing
+   field, `[JsonPropertyName]`, change logging in `SettingsService`). Clamp the duration to 30–1800 on set.
+   The save-scope option is upstream's `ClearReplayBufferAfterSave`, not a new setting.
 3. Add `DiskBufferDuration` to `GameRecordingModeOverride` and to the effective-settings resolution (`eff.*` in `OBSService`), so per-game overrides work.
 4. Add the TS types: `'DiskBuffer'` in the `RecordingMode` union, plus the three new fields.
 
@@ -169,10 +172,11 @@ internal static class DiskBufferService
 3. Compute the window:
    - `windowEnd = requestedAt`
    - `windowStart = requestedAt − DiskBufferDuration`
-   - if `DiskBufferSaveSinceLastSave` and `_lastSaveEnd` is later, `windowStart = _lastSaveEnd`. This mirrors upstream, which resets the RAM buffer after a save so the next save only contains new footage, and it avoids writing 30 minutes of overlap twice.
+   - if `ClearReplayBufferAfterSave` and `_lastSaveEnd` is later, `windowStart = _lastSaveEnd`. This mirrors upstream, which resets the RAM buffer after a save so the next save only contains new footage, and it avoids writing 30 minutes of overlap twice.
 4. Select the closed segments whose span overlaps the window, and **pin** them (`Pins++`).
 5. Write `concat.txt` in a temp folder using `FFmpegService.BuildConcatListLine`. On the first entry add `inpoint <seconds>`, where seconds = `windowStart − firstSegment.StartedAt`, clamped at ≥ 0.
-6. Output path: `<ContentFolder>/Replay Buffers/<sanitizedGameName>/<yyyy-MM-dd_HH-mm-ss>.mp4`, the same folder and naming the RAM path uses, so the library picks it up.
+6. Output path: the folder the RAM path uses, through `StorageService.GetOutputFolder`, so the "game
+   subfolders" setting is honoured; the same naming, so the library picks it up.
 7. Run FFmpeg through `FFmpegService.RunWithProgress`: `-f concat -safe 0 -i concat.txt -map 0 -c copy [-tag:v hvc1 if HEVC] <out.mp4>`. A full 30-min save can be 8–16 GB, so it must run off the UI thread, and recording continues during it.
 8. On success, run the same steps as the end of `OBSService.SaveReplayBuffer()`:
    - send `ReplayBufferSaved`
@@ -219,7 +223,7 @@ Files: `CaptureModeSection.tsx`, `VideoSettingsSection.tsx`, `types.ts`, and the
 
 - [ ] Durations of 30 s, 5 min and 30 min. Disk use stays flat over a 60-minute play session.
 - [ ] Saving right after the game starts (the buffer is shorter than N) saves whatever exists.
-- [ ] Two saves 2 minutes apart with `DiskBufferSaveSinceLastSave = true`: the second file is about 2 minutes long. With it set to false, the second file is the full N.
+- [ ] Two saves 2 minutes apart with `ClearReplayBufferAfterSave = true`: the second file is about 2 minutes long. With it set to false, the second file is the full N.
 - [ ] Pressing the hotkey twice quickly: the second save queues and doesn't corrupt anything.
 - [ ] Saving a full 30-minute window while still playing: recording continues, no segments are pruned mid-save, and FPS doesn't drop noticeably.
 - [ ] Game exits during a save: the save completes, then segments are purged.

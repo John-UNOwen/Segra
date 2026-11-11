@@ -56,8 +56,7 @@ namespace Segra.Backend.Media
 
                 // Use game from first segment for the output folder
                 var firstSegment = segments.FirstOrDefault();
-                string outputGameFolder = StorageService.SanitizeGameNameForFolder(firstSegment?.Game ?? "Unknown");
-                string outputFolder = PathUtils.Combine(videoFolder, FolderNames.Clips, outputGameFolder);
+                string outputFolder = StorageService.GetOutputFolder(PathUtils.Combine(videoFolder, FolderNames.Clips), firstSegment?.Game);
                 Directory.CreateDirectory(outputFolder);
 
                 if (!FFmpegService.FFmpegExists())
@@ -108,7 +107,8 @@ namespace Segra.Backend.Media
                 // The join copies the encoded streams, so clips cut from different videos must share one format
                 List<string> sourceVideos = inputFilePaths.Where(File.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 bool joinsVideos = !createSeparateClips && sourceVideos.Count > 1;
-                bool copyVideo = copyMatchingVideo && joinsVideos && await HaveSameStreamFormats(sourceVideos, includeAudio: false);
+                List<WebcamLayer?> webcams = segments.Select(GetVisibleWebcam).ToList();
+                bool copyVideo = copyMatchingVideo && joinsVideos && webcams.All(w => w == null) && await HaveSameStreamFormats(sourceVideos, includeAudio: false);
                 Dictionary<string, string?> joinVideoFilters = joinsVideos && !copyVideo
                     ? await BuildJoinVideoFilters(sourceVideos)
                     : new Dictionary<string, string?>();
@@ -132,7 +132,7 @@ namespace Segra.Backend.Media
                     List<string>? targetLayout = Settings.Instance.ClipKeepSeparateAudioTracks ? unionAudioLayout : null;
                     joinVideoFilters.TryGetValue(inputFilePath, out string? videoFilter);
 
-                    await ExtractClip(id, inputFilePath, tempFileName, segment.StartTime, segment.EndTime, segmentTrackNames, segment.MutedAudioTracks, segment.AudioTrackVolumes, targetLayout, videoFilter, joinsVideos, copyVideo, progress =>
+                    await ExtractClip(id, inputFilePath, tempFileName, segment.StartTime, segment.EndTime, segmentTrackNames, segment.MutedAudioTracks, segment.AudioTrackVolumes, targetLayout, videoFilter, joinsVideos, copyVideo, webcams[segmentIndex], progress =>
                     {
                         double clampedProgress = Math.Min(progress, 1.0);
                         double currentProgress = (processedDuration + (clampedProgress * clipDuration)) / totalDuration * 95;
@@ -168,8 +168,7 @@ namespace Segra.Backend.Media
                     for (int i = 0; i < tempClipFiles.Count; i++)
                     {
                         var segment = extractedSegments[i];
-                        string segmentGameFolder = StorageService.SanitizeGameNameForFolder(segment.Game ?? "Unknown");
-                        string segmentOutputFolder = PathUtils.Combine(videoFolder, FolderNames.Clips, segmentGameFolder);
+                        string segmentOutputFolder = StorageService.GetOutputFolder(PathUtils.Combine(videoFolder, FolderNames.Clips), segment.Game);
                         Directory.CreateDirectory(segmentOutputFolder);
 
                         string outputFileName = $"{batchTimestamp}_segment-{i + 1:000}.mp4";
@@ -381,7 +380,7 @@ namespace Segra.Backend.Media
                 }
 
                 Content first = sessions[0];
-                string outputFolder = PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Sessions, StorageService.SanitizeGameNameForFolder(first.Game));
+                string outputFolder = StorageService.GetOutputFolder(PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Sessions), first.Game);
                 Directory.CreateDirectory(outputFolder);
                 outputFilePath = GetUniqueOutputFilePath(PathUtils.Combine(outputFolder, $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4"));
 
@@ -531,7 +530,7 @@ namespace Segra.Backend.Media
 
         private static async Task ExtractClip(int clipId, string inputFilePath, string outputFilePath, double startTime, double endTime,
                             List<string>? audioTrackNames, List<int>? mutedAudioTracks, Dictionary<int, double>? audioTrackVolumes, List<string>? targetAudioLayout,
-                            string? videoFilter, bool normalizeAudio, bool copyVideo, Action<double> progressCallback)
+                            string? videoFilter, bool normalizeAudio, bool copyVideo, WebcamLayer? webcam, Action<double> progressCallback)
         {
             double duration = endTime - startTime;
             var settings = Settings.Instance;
@@ -660,6 +659,7 @@ namespace Segra.Backend.Media
             string metadataArgs = "";
             string filterArgs = "";
             string extraInputArgs = "";
+            int extraInputCount = 0;
 
             if (targetAudioLayout != null && targetAudioLayout.Count > 0)
             {
@@ -803,6 +803,7 @@ namespace Segra.Backend.Media
 
                 filterArgs = filterParts.Count > 0 ? $"-filter_complex \"{string.Join(";", filterParts)}\" " : "";
                 extraInputArgs = extraInputParts.Count > 0 ? string.Join(" ", extraInputParts) + " " : "";
+                extraInputCount = extraInputParts.Count;
                 mapArgs = string.Join(" ", mapParts) + " ";
                 metadataArgs = string.Join(" ", metaParts) + " ";
             }
@@ -899,10 +900,25 @@ namespace Segra.Backend.Media
             string audioRateArg = normalizeAudio ? "-ar 48000 -ac 2 " : targetAudioLayout != null ? "-ar 48000 " : "";
             string videoFilterChain = string.Join(",", new[] { videoFilter, hwUploadFilter }.Where(f => !string.IsNullOrEmpty(f)));
             string videoFilterArgs = videoFilterChain.Length > 0 ? $"-vf \"{videoFilterChain}\" " : "";
+
+            // The webcam is drawn into the video graph, so the video moves from -vf into -filter_complex
+            string webcamInputArgs = "";
+            if (webcam != null && !copyVideo && await BuildWebcamOverlay(webcam, inputFilePath, startTime, duration, 1 + extraInputCount) is { } overlay)
+            {
+                webcamInputArgs = overlay.InputArgs;
+                string videoGraph = overlay.Graph + (videoFilterChain.Length > 0 ? $",{videoFilterChain}" : "") + "[vout]";
+                filterArgs = filterArgs.Length > 0
+                    ? filterArgs.Replace("-filter_complex \"", $"-filter_complex \"{videoGraph};")
+                    : $"-filter_complex \"{videoGraph}\" ";
+                mapArgs = mapArgs.Length > 0
+                    ? mapArgs.Replace("-map 0:v:0", "-map \"[vout]\"")
+                    : "-map \"[vout]\" -map 0:a:0? ";
+                videoFilterArgs = "";
+            }
             string hwDecodeArgs = copyVideo ? "" : await BuildHwDecodeArgs(inputFilePath);
             string BuildArguments(string decodeArgs) =>
                              $"-y {decodeArgs}{hwDeviceArgs}-ss {startTime.ToString(CultureInfo.InvariantCulture)} -t {duration.ToString(CultureInfo.InvariantCulture)} " +
-                             $"-i \"{inputFilePath}\" {extraInputArgs}{filterArgs}{mapArgs}{videoFilterArgs}-c:v {videoCodec} {presetArgs} {qualityArgs} {fpsArg} " +
+                             $"-i \"{inputFilePath}\" {extraInputArgs}{webcamInputArgs}{filterArgs}{mapArgs}{videoFilterArgs}-c:v {videoCodec} {presetArgs} {qualityArgs} {fpsArg} " +
                              $"-c:a aac -b:a {settings.ClipAudioQuality} {audioRateArg}{metadataArgs}-map_chapters -1 -t {duration.ToString(CultureInfo.InvariantCulture)} -movflags +faststart \"{outputFilePath}\"";
             string arguments = BuildArguments(hwDecodeArgs);
             Log.Information("Extracting clip");
@@ -1100,12 +1116,16 @@ namespace Segra.Backend.Media
             return unionTypes;
         }
 
+        // Library content plus the session being recorded, when it was opened
+        private static IEnumerable<Content> SourceContent() =>
+            MessageService.LiveContent is Content live ? AppState.Instance.Content.Append(live) : AppState.Instance.Content;
+
         private static List<string>? GetSourceAudioTrackNames(Segment segment)
         {
             try
             {
                 var contentType = Enum.Parse<Content.ContentType>(segment.Type);
-                var source = AppState.Instance.Content.FirstOrDefault(c =>
+                var source = SourceContent().FirstOrDefault(c =>
                     c.Type == contentType &&
                     (!string.IsNullOrEmpty(segment.FilePath)
                         ? string.Equals(PathUtils.Normalize(c.FilePath), PathUtils.Normalize(segment.FilePath), StringComparison.OrdinalIgnoreCase)
@@ -1129,7 +1149,7 @@ namespace Segra.Backend.Media
             try
             {
                 var contentType = Enum.Parse<Content.ContentType>(segment.Type);
-                var source = AppState.Instance.Content.FirstOrDefault(c =>
+                var source = SourceContent().FirstOrDefault(c =>
                     c.Type == contentType &&
                     (!string.IsNullOrEmpty(segment.FilePath)
                         ? string.Equals(PathUtils.Normalize(c.FilePath), PathUtils.Normalize(segment.FilePath), StringComparison.OrdinalIgnoreCase)
@@ -1151,7 +1171,7 @@ namespace Segra.Backend.Media
             try
             {
                 var contentType = Enum.Parse<Content.ContentType>(segment.Type);
-                var source = AppState.Instance.Content.FirstOrDefault(c =>
+                var source = SourceContent().FirstOrDefault(c =>
                     c.Type == contentType &&
                     (!string.IsNullOrEmpty(segment.FilePath)
                         ? string.Equals(PathUtils.Normalize(c.FilePath), PathUtils.Normalize(segment.FilePath), StringComparison.OrdinalIgnoreCase)
@@ -1164,6 +1184,53 @@ namespace Segra.Backend.Media
                 Log.Warning($"Failed to read source game exe path: {ex.Message}");
                 return null;
             }
+        }
+
+        private static WebcamLayer? GetVisibleWebcam(Segment segment)
+        {
+            try
+            {
+                var contentType = Enum.Parse<Content.ContentType>(segment.Type);
+                var webcam = SourceContent().FirstOrDefault(c =>
+                    c.Type == contentType &&
+                    (!string.IsNullOrEmpty(segment.FilePath)
+                        ? string.Equals(PathUtils.Normalize(c.FilePath), PathUtils.Normalize(segment.FilePath), StringComparison.OrdinalIgnoreCase)
+                        : string.Equals(c.FileName, segment.FileName, StringComparison.OrdinalIgnoreCase)))?.Webcam;
+
+                return webcam != null && !webcam.Hidden && File.Exists(webcam.FilePath) ? webcam : null;
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"Failed to read the source webcam layer: {ex.Message}");
+                return null;
+            }
+        }
+
+        // Scales the webcam into its 16:9 box (the same placement as the editor) and overlays it
+        private static async Task<(string InputArgs, string Graph)?> BuildWebcamOverlay(WebcamLayer webcam, string inputFilePath, double startTime, double duration, int inputIndex)
+        {
+            if (await FFmpegService.GetVideoFormat(inputFilePath) is not { } format)
+                return null;
+
+            static int Even(double value) => Math.Max(2, (int)Math.Round(value / 2) * 2);
+            // One global layout, the same one the editor shows
+            var settings = Settings.Instance;
+            int width = Even(format.Width * Math.Clamp(settings.WebcamSize, 5, 50) / 100.0);
+            int height = Even(Math.Min(width * 9 / 16.0, format.Height));
+            int x = (int)Math.Clamp(Math.Round(format.Width * settings.WebcamX / 100), 0, format.Width - width);
+            int y = (int)Math.Clamp(Math.Round(format.Height * settings.WebcamY / 100), 0, format.Height - height);
+
+            // A webcam that starts after the clip does is delayed to its place
+            double webcamStart = startTime - webcam.Offset;
+            double delay = Math.Max(0, -webcamStart);
+            string inputArgs = $"-ss {Math.Max(0, webcamStart).ToString(CultureInfo.InvariantCulture)} -t {duration.ToString(CultureInfo.InvariantCulture)} -i \"{webcam.FilePath}\" ";
+            // Rounded corners, radius 6% of the height (matches the editor)
+            int r = Math.Max(1, (int)Math.Round(height * 0.06));
+            string corners = $"format=yuva420p,geq=lum='p(X,Y)':cb='p(X,Y)':cr='p(X,Y)':a='if(gt(pow(max(max({r}-X,X-(W-1-{r})),0),2)+pow(max(max({r}-Y,Y-(H-1-{r})),0),2),{r}*{r}),0,255)',";
+            string graph = $"[{inputIndex}:v:0]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},setsar=1,{corners}" +
+                           $"setpts=PTS-STARTPTS+{delay.ToString(CultureInfo.InvariantCulture)}/TB[cam];" +
+                           $"[0:v:0][cam]overlay={x}:{y}:eof_action=pass:format=auto";
+            return (inputArgs, graph);
         }
 
         private static void SafeDelete(string path)

@@ -436,7 +436,7 @@ namespace Segra.Backend.App
         {
             lines.Add("--- Game detection ---");
             var s = Settings.Instance;
-            lines.Add($"Custom game settings: {s.Games.Count} entries ({s.Games.Count(g => g.Record)} recording, {s.Games.Count(g => !g.Record)} blocked)");
+            lines.Add($"Custom game settings: {s.Games.Count} entries ({s.Games.Count(g => g.Record == true)} recording, {s.Games.Count(g => g.Record == false)} blocked, {s.Games.Count(g => g.Record == null)} auto)");
             lines.Add($"Game integrations: CS2={s.GameIntegrations.CounterStrike2.Enabled}, LoL={s.GameIntegrations.LeagueOfLegends.Enabled}, PUBG={s.GameIntegrations.Pubg.Enabled}, RocketLeague={s.GameIntegrations.RocketLeague.Enabled}");
         }
 
@@ -449,7 +449,6 @@ namespace Segra.Backend.App
             lines.Add($"Auto generate highlights: {s.AutoGenerateHighlights}");
             lines.Add($"Run on startup: {s.RunOnStartup}");
             lines.Add($"Receive beta updates: {s.ReceiveBetaUpdates}");
-            lines.Add($"Auto install updates: {s.AutoInstallUpdates}");
             lines.Add($"Confirm before deleting: {s.ConfirmBeforeDeleting}");
             lines.Add($"Remove original after compression: {s.RemoveOriginalAfterCompression}");
             lines.Add($"Discard sessions without bookmarks: {s.DiscardSessionsWithoutBookmarks}");

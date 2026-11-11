@@ -152,7 +152,8 @@ the whole disk buffer tree first (`Purged 7 disk buffer file(s), 66.7 MB reclaim
 `Purged 183 disk buffer file(s), 7585.2 MB reclaimed`) before `RecoveryService` scans for orphaned
 content.
 
-`diskBufferSaveSinceLastSave`. After a save, later saves take only what arrived since that save;
+`diskBufferSaveSinceLastSave` — since upstream added `ClearReplayBufferAfterSave`, the disk buffer reads
+that one and the separate flag is gone. After a save, later saves take only what arrived since that save;
 clearing the flag restores the full window. Test 2 logged `DiskBufferSaveSinceLastSave changed from
 'True' to 'False'` at 12:04:48.859, and the save that followed covered the whole 300 s window
 (31 segments, 300.7 s) instead of the 170 s since the previous save.

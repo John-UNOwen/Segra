@@ -140,6 +140,9 @@ namespace Segra.Backend.App
                             root.TryGetProperty("Parameters", out JsonElement clipParameterElement);
                             _ = Task.Run(() => HandleCreateClip(clipParameterElement));
                             break;
+                        case "OpenRecordingSnapshot":
+                            _ = Task.Run(HandleOpenRecordingSnapshot);
+                            break;
                         case "MergeContent":
                             root.TryGetProperty("Parameters", out JsonElement mergeParameterElement);
                             _ = Task.Run(() => HandleMergeContent(mergeParameterElement));
@@ -172,6 +175,9 @@ namespace Segra.Backend.App
                             break;
                         case "RestartApp":
                             _ = Task.Run(() => Program.Restart("requested by the user", minimized: false));
+                            break;
+                        case "GetRunningApps":
+                            _ = Task.Run(SendRunningApps);
                             break;
 #endif
                         case "DeleteContent":
@@ -263,6 +269,14 @@ namespace Segra.Backend.App
                         case "SelectGameExecutable":
                             await HandleSelectGameExecutable();
                             break;
+                        case "SelectRunningGameExecutable":
+                            if (root.TryGetProperty("Parameters", out JsonElement runningExeParams) &&
+                                runningExeParams.TryGetProperty("Path", out JsonElement runningExePath) &&
+                                runningExePath.ValueKind == JsonValueKind.String)
+                            {
+                                await HandleSelectGameExecutable(runningExePath.GetString());
+                            }
+                            break;
                         case "StartRecording":
                             if (AppState.Instance.Recording != null || AppState.Instance.PreRecording != null)
                             {
@@ -274,6 +288,9 @@ namespace Segra.Backend.App
                             break;
                         case "StopRecording":
                             _ = Task.Run(() => OBSService.StopRecording(userRequested: true));
+                            break;
+                        case "RefreshWebcams":
+                            _ = Task.Run(AppState.Instance.UpdateWebcams);
                             break;
                         case "RefreshStorageStats":
                             StorageService.UpdateRecordingDriveSpaceInState();
@@ -353,6 +370,10 @@ namespace Segra.Backend.App
                             root.TryGetProperty("Parameters", out JsonElement renameContentParameterElement);
                             await ContentService.HandleRenameContent(renameContentParameterElement);
                             Log.Information("RenameContent command received.");
+                            break;
+                        case "SetWebcamLayer":
+                            root.TryGetProperty("Parameters", out JsonElement webcamLayerParameterElement);
+                            _ = Task.Run(() => ContentService.HandleSetWebcamLayer(webcamLayerParameterElement));
                             break;
                         case "ImportFile":
                             root.TryGetProperty("Parameters", out JsonElement importParameterElement);
@@ -720,11 +741,12 @@ namespace Segra.Backend.App
             "crfValue", "cqLevel", "encoder", "codec", "stretch4By3", "enableHdr", "replayBufferDuration",
             "replayBufferMaxSize", "diskBufferDuration", "diskBufferFolder",
             "inputDevices", "outputDevices", "forceMonoInputSources", "inputNoiseSuppression",
-            "enableSeparateAudioTracks", "audioOutputMode", "gameIntegrations"
+            "enableSeparateAudioTracks", "audioOutputMode", "applicationAudioCaptures", "gameIntegrations",
+            "webcamEnabled", "webcamDeviceId"
         ];
 
-        // diskBufferSaveSinceLastSave is deliberately not in that list: the disk buffer reads it at
-        // save time, so it must not be reported as a change that waits for the next recording.
+        // clearReplayBufferAfterSave is deliberately not in that list: both buffer modes read it at save
+        // time, so it must not be reported as a change that waits for the next recording.
 
         // Serialized exactly like the Settings message so the frontend can compare values directly
         public static JsonObject GetRecordingStartSettings()
@@ -807,6 +829,26 @@ namespace Segra.Backend.App
             }
         }
 
+#if WINDOWS
+        private static async Task SendRunningApps()
+        {
+            try
+            {
+                var apps = Windows.Display.WindowUtils.GetRunningApps();
+                // Icons for saved apps, so they still show one when not running
+                var savedIcons = Settings.Instance.ApplicationAudioCaptures
+                    .Where(a => !string.IsNullOrEmpty(a.Path))
+                    .DistinctBy(a => a.Exe, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(a => a.Exe, a => IconUtils.GetExeIconDataUrl(a.Path!), StringComparer.OrdinalIgnoreCase);
+                await SendFrontendMessage("RunningApps", new { apps, savedIcons });
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to list running apps");
+            }
+        }
+#endif
+
         private static async Task HandleCreateAiClip(JsonElement message)
         {
             Log.Information($"{message}");
@@ -838,6 +880,66 @@ namespace Segra.Backend.App
             }
         }
 
+        // The session being recorded as last opened, so clips can be made from it
+        public static Content? LiveContent { get; private set; }
+
+        // Builds a normal MP4 index for the in-progress Hybrid MP4 session, served without copying the file
+        private static async Task HandleOpenRecordingSnapshot()
+        {
+            var recording = AppState.Instance.Recording;
+            string? source = recording?.FilePath;
+            if (recording == null || string.IsNullOrEmpty(source) || !File.Exists(source))
+            {
+                await SendFrontendMessage("RecordingSnapshotFailed", new { message = "No session recording is in progress." });
+                return;
+            }
+
+            string waveformDir = FolderNames.GetWaveformsFolderPath(Content.ContentType.Session);
+            if (Directory.Exists(waveformDir))
+            {
+                foreach (var old in Directory.GetFiles(waveformDir, "live-*.peaks.json"))
+                {
+                    try { File.Delete(old); } catch { }
+                }
+            }
+
+            try
+            {
+                var started = DateTime.Now;
+                var live = await Task.Run(() => LiveMp4.Build(source));
+                LiveMp4.Current = live;
+                Log.Information($"Live index built in {(DateTime.Now - started).TotalMilliseconds:F0} ms ({live.Duration}, {live.Header.Length / 1024} KB index)");
+
+                var content = new Content
+                {
+                    Id = $"live-{Guid.NewGuid()}",
+                    Type = Content.ContentType.Session,
+                    Game = recording.Game,
+                    Bookmarks = recording.Bookmarks.ToList(),
+                    FileName = Path.GetFileNameWithoutExtension(source),
+                    FilePath = source,
+                    FileSizeKb = live.DataLength / 1024,
+                    FileSize = $"{live.DataLength / 1048576.0:F0} MB",
+                    Duration = live.Duration,
+                    CreatedAt = recording.StartTime,
+                    AudioTrackNames = recording.AudioTrackNames,
+                    AudioTrackTypes = recording.AudioTrackTypes,
+                };
+                LiveContent = content;
+                await SendFrontendMessage("RecordingSnapshotReady", content);
+
+                // The video page refetches its waveform on WaveformCreated
+                if (Settings.Instance.ShowAudioWaveformInTimeline)
+                    _ = Task.Run(() => ContentService.CreateWaveformFile(source, Content.ContentType.Session, content.Id));
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Failed to open the session being recorded");
+                await SendFrontendMessage("RecordingSnapshotFailed", new { message = "Could not open the recording." });
+                await ShowModal("Could not open the recording", "The session being recorded could not be opened. Check the log for more details.", "error");
+            }
+        }
+
         private static async Task HandleCreateClip(JsonElement message)
         {
             Log.Information($"{message}");
@@ -857,7 +959,8 @@ namespace Segra.Backend.App
                         double startTime = startTimeElement.GetDouble();
                         double endTime = endTimeElement.GetDouble();
 
-                        Content? content = AppState.Instance.Content.FirstOrDefault(c => c.Id == contentId);
+                        Content? content = AppState.Instance.Content.FirstOrDefault(c => c.Id == contentId)
+                            ?? (LiveContent?.Id == contentId ? LiveContent : null);
 
                         if (content == null)
                         {
@@ -1057,11 +1160,12 @@ namespace Segra.Backend.App
             }
         }
 
-        private static async Task HandleSelectGameExecutable()
+        // Without a path the file picker is shown; with one (a running app) it is used as the pick
+        private static async Task HandleSelectGameExecutable(string? path = null)
         {
             try
             {
-                string? pickedFile = await PlatformServices.Dialogs.PickFileAsync("Select Game Executable", "Executable Files (*.exe)", "exe");
+                string? pickedFile = path ?? await PlatformServices.Dialogs.PickFileAsync("Select Game Executable", "Executable Files (*.exe)", "exe");
 
                 if (pickedFile != null)
                 {

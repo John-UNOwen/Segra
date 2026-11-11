@@ -13,6 +13,7 @@ namespace Segra.Backend.Shared
         public const string Buffers = "Replay Buffers";
         public const string Clips = "Clips";
         public const string Highlights = "Highlights";
+        public const string Webcam = "Webcam";
 
         // Rolling disk buffer segment folder (default under the content folder). Not a content type:
         // nothing inside it is ever library content.

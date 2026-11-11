@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { VolumeX, Volume2 } from 'lucide-react';
+import { VolumeX, Volume2, SkipBack, SkipForward } from 'lucide-react';
 import CloudBadge from '../CloudBadge';
 import DropdownSelect from '../DropdownSelect';
 import RangeSlider from '../RangeSlider';
@@ -19,12 +19,15 @@ export default function PreferencesSection({ settings, updateSettings }: Prefere
   const interfaceToggles: {
     key:
       | 'showGameBackground'
-      | 'showAudioWaveformInTimeline'
-      | 'showBookmarksInFullscreen'
+      | 'showLiveSessionCard'
       | 'showNewBadgeOnVideos'
-      | 'confirmBeforeDeleting';
+      | 'confirmBeforeDeleting'
+      | 'showAudioWaveformInTimeline'
+      | 'showClipToolsOnClips'
+      | 'showVideoNavigation'
+      | 'showBookmarksInFullscreen';
     label: React.ReactNode;
-    description: string;
+    description: React.ReactNode;
   }[] = [
     {
       key: 'showGameBackground',
@@ -36,28 +39,55 @@ export default function PreferencesSection({ settings, updateSettings }: Prefere
       description: 'Shows cover art on the recording card and the game integration cards.',
     },
     {
-      key: 'showAudioWaveformInTimeline',
-      label: 'Show Audio Waveform',
-      description: 'Draws the audio waveform along the video editor timeline.',
-    },
-    {
-      key: 'showBookmarksInFullscreen',
-      label: 'Show Bookmarks in Fullscreen',
-      description: 'Shows bookmarks above the seek bar in the fullscreen video player.',
+      key: 'showLiveSessionCard',
+      label: 'Show Session Being Recorded',
+      description:
+        'Shows the session being recorded first in Full Sessions so you can watch and clip it before the recording stops.',
     },
     {
       key: 'showNewBadgeOnVideos',
-      label: (
+      label: 'Show New Badge',
+      description: (
         <>
-          Show<span className="badge badge-primary badge-sm text-base-300 mx-1">NEW</span>Badge
+          Marks sessions and replays from the last hour that you haven't opened yet with a
+          <span className="badge badge-primary badge-xs text-base-300 mx-1 align-middle relative -top-[1.5px]">
+            NEW
+          </span>
+          badge.
         </>
       ),
-      description: "Marks sessions and replays from the last hour that you haven't opened yet.",
     },
     {
       key: 'confirmBeforeDeleting',
       label: 'Confirm Before Deleting',
       description: 'Asks before videos, recovered recordings or game paths are deleted.',
+    },
+    {
+      key: 'showAudioWaveformInTimeline',
+      label: 'Show Audio Waveform',
+      description: 'Draws the audio waveform along the video editor timeline.',
+    },
+    {
+      key: 'showClipToolsOnClips',
+      label: 'Show Clip Tools on Clips and Highlights',
+      description:
+        'Shows the Create Clip and Add Segment buttons when watching a clip or highlight.',
+    },
+    {
+      key: 'showVideoNavigation',
+      label: 'Show Previous and Next Video',
+      description: (
+        <>
+          Shows the <SkipBack className="inline w-3.5 h-3.5 align-[-2px]" aria-hidden="true" /> and{' '}
+          <SkipForward className="inline w-3.5 h-3.5 align-[-2px]" aria-hidden="true" /> buttons in
+          the video player to go to the previous or next video in the list.
+        </>
+      ),
+    },
+    {
+      key: 'showBookmarksInFullscreen',
+      label: 'Show Bookmarks in Fullscreen',
+      description: 'Shows bookmarks above the seek bar in the fullscreen video player.',
     },
   ];
 
@@ -145,7 +175,7 @@ export default function PreferencesSection({ settings, updateSettings }: Prefere
 
       <div className="p-4 bg-base-300 rounded-lg shadow-md border border-base-400">
         <h2 className="text-xl font-semibold mb-4">Interface</h2>
-        <div className="flex flex-col gap-3">
+        <div className="grid grid-cols-2 gap-3">
           {interfaceToggles.map(({ key, label, description }) => (
             <label
               key={key}

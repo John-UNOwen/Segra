@@ -6,6 +6,7 @@ using Segra.Backend.App;
 using Segra.Backend.Core;
 using Segra.Backend.Media;
 using Segra.Backend.Shared;
+using Segra.Backend.Windows.Storage;
 using Segra.Backend.Core.Models;
 using System;
 using System.IO;
@@ -407,7 +408,7 @@ namespace Segra.Backend.Recorder
         /// Builds a saved replay: takes a save lease from the ledger (a recording that is stopping or
         /// gone is refused, with the reason, before anything is announced to the frontend), forces the
         /// current segment to close, selects the closed segments covering the window (since the previous
-        /// save when DiskBufferSaveSinceLastSave is on, otherwise the full buffer duration), and
+        /// save when ClearReplayBufferAfterSave is on, otherwise the full buffer duration), and
         /// stream-copies them into one mp4, assembled in the segment folder and moved into Replay
         /// Buffers only after ffmpeg succeeded. Returns the output path, the wall-clock save instant and
         /// a bookmark position resolver; null when the save was refused, nothing could be saved or
@@ -493,7 +494,9 @@ namespace Segra.Backend.Recorder
                 lock (_lock)
                 {
                     windowStart = requestedAt - TimeSpan.FromSeconds(ledger.WindowSeconds);
-                    if (Settings.Instance.DiskBufferSaveSinceLastSave && _lastSaveEnd.HasValue && _lastSaveEnd.Value > windowStart)
+                    // The same setting the RAM buffer honours: with clearing on, a save consumes what it
+                    // saved, so the next save holds only new footage instead of writing the overlap twice.
+                    if (Settings.Instance.ClearReplayBufferAfterSave && _lastSaveEnd.HasValue && _lastSaveEnd.Value > windowStart)
                         windowStart = _lastSaveEnd.Value;
                 }
 
@@ -556,13 +559,16 @@ namespace Segra.Backend.Recorder
                 string tagArgs = codec == "hevc" ? " -tag:v hvc1" : "";
 
                 // ffmpeg assembles into the segment folder and the finished file is published into the
-                // library only after that succeeded. DiskBufferSaveAssembly owns the staging name, the
-                // publish and the partials either leaves behind, and reports every failure instead of
+                // library only after that succeeded. The library folder follows the "game subfolders"
+                // setting exactly like a RAM buffer save. DiskBufferSaveAssembly owns the staging name,
+                // the publish and the partials either leaves behind, and reports every failure instead of
                 // throwing: this save runs on a task nobody is watching, and the user has already been
                 // told it started.
+                string outputFolder = StorageService.GetOutputFolder(
+                    PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Buffers), _gameFolderName);
                 var assembly = await DiskBufferSaveAssembly.RunAsync(
                     _segmentFolder,
-                    PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Buffers, _gameFolderName),
+                    outputFolder,
                     $"{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.mp4",
                     listLines,
                     tagArgs,

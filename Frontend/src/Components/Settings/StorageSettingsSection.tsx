@@ -10,7 +10,8 @@ import Button from '../Button';
 import MigrationFlow from '../MigrationFlow';
 import { useAppState } from '../../Context/AppStateContext';
 import { useContentMigration } from '../../Context/ContentMigrationContext';
-import StorageUsageMeter from './StorageUsageMeter';
+import StorageUsageMeter, { sumExcludedGb } from './StorageUsageMeter';
+import { AutoDeleteClipsToggle, AutoDeleteField } from './AutoDeleteSettings';
 
 const normalizePath = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '');
 
@@ -126,8 +127,15 @@ export default function StorageSettingsSection({
   };
 
   // A limit below the current folder size makes the next cleanup delete older recordings
-  const confirmLimit = (limitGb: number, onConfirm: () => void, onCancel?: () => void) => {
-    const currentFolderSizeGb = appState.currentFolderSizeGb;
+  const confirmLimit = (
+    limitGb: number,
+    onConfirm: () => void,
+    onCancel?: () => void,
+    excludeClips = settings.excludeClipsFromStorageLimit,
+  ) => {
+    const currentFolderSizeGb =
+      appState.currentFolderSizeGb -
+      (excludeClips ? sumExcludedGb(appState.content, settings.contentFolder) : 0);
     if (limitGb >= currentFolderSizeGb) {
       onConfirm();
       return;
@@ -169,6 +177,19 @@ export default function StorageSettingsSection({
       updateSettings({ unlimitedStorage: true });
     } else {
       confirmLimit(settings.storageLimit, () => updateSettings({ unlimitedStorage: false }));
+    }
+  };
+
+  const handleExcludeClipsChange = (exclude: boolean) => {
+    if (exclude || settings.unlimitedStorage) {
+      updateSettings({ excludeClipsFromStorageLimit: exclude });
+    } else {
+      confirmLimit(
+        settings.storageLimit,
+        () => updateSettings({ excludeClipsFromStorageLimit: false }),
+        undefined,
+        false,
+      );
     }
   };
 
@@ -281,6 +302,12 @@ export default function StorageSettingsSection({
               : 'Older sessions and replay buffers are deleted to stay under the limit.'}
           </div>
         </div>
+
+        <AutoDeleteField
+          settings={settings}
+          content={appState.content}
+          updateSettings={updateSettings}
+        />
       </div>
 
       <div className="mt-4">
@@ -289,6 +316,7 @@ export default function StorageSettingsSection({
           contentFolder={settings.contentFolder}
           storageLimitGb={settings.storageLimit}
           unlimited={settings.unlimitedStorage}
+          excludeClips={settings.excludeClipsFromStorageLimit}
           usedGb={appState.currentFolderSizeGb}
           driveUsedGb={driveUsedGb}
           driveFreeGb={driveFreeGb}
@@ -296,6 +324,43 @@ export default function StorageSettingsSection({
       </div>
 
       <div className="mt-4 flex flex-col gap-3">
+        <label className="flex items-center gap-3 cursor-pointer p-3 bg-base-200 rounded-lg border border-base-400">
+          <input
+            type="checkbox"
+            name="gameSubfolders"
+            checked={settings.gameSubfolders}
+            onChange={(e) => updateSettings({ gameSubfolders: e.target.checked })}
+            className="checkbox checkbox-primary checkbox-sm"
+          />
+          <div>
+            <div className="font-semibold">Save Recordings in Game Folders</div>
+            <div className="text-sm opacity-70 mt-0.5">
+              Puts each recording in a folder named after the game. Changing this moves your
+              existing recordings.
+            </div>
+          </div>
+        </label>
+        <label className="flex items-center gap-3 cursor-pointer p-3 bg-base-200 rounded-lg border border-base-400">
+          <input
+            type="checkbox"
+            name="excludeClipsFromStorageLimit"
+            checked={settings.excludeClipsFromStorageLimit}
+            onChange={(e) => handleExcludeClipsChange(e.target.checked)}
+            className="checkbox checkbox-primary checkbox-sm"
+          />
+          <div>
+            <div className="font-semibold">Exclude Clips and Highlights From Storage Limit</div>
+            <div className="text-sm opacity-70 mt-0.5">
+              Clips and highlights are never deleted to free up space. When on, only sessions and
+              replay buffers count toward the limit.
+            </div>
+          </div>
+        </label>
+        <AutoDeleteClipsToggle
+          settings={settings}
+          content={appState.content}
+          updateSettings={updateSettings}
+        />
         <label className="flex items-center gap-3 cursor-pointer p-3 bg-base-200 rounded-lg border border-base-400">
           <input
             type="checkbox"

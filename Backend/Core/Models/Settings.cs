@@ -61,6 +61,8 @@ namespace Segra.Backend.Core.Models
         private bool _pendingOBSUpdate = false;
         private int _storageLimit = 100;
         private bool _unlimitedStorage = false;
+        private bool _excludeClipsFromStorageLimit = false;
+        private bool _gameSubfolders = true;
         private List<DeviceSetting> _inputDevices = new List<DeviceSetting>();
         private List<DeviceSetting> _outputDevices = new List<DeviceSetting>();
         private Display? _selectedDisplay = null;
@@ -74,7 +76,6 @@ namespace Segra.Backend.Core.Models
         // Linux has no tray, so closing to it left the app running with no visible way to quit
         private CloseButtonAction _closeButtonAction = OperatingSystem.IsWindows() ? CloseButtonAction.Minimize : CloseButtonAction.Exit;
         private bool _receiveBetaUpdates = false;
-        private bool _autoInstallUpdates = true;
         private bool _airplaneMode = false;
         private RecordingMode _recordingMode = RecordingMode.Hybrid;
         private int _replayBufferDuration = 30;
@@ -83,7 +84,7 @@ namespace Segra.Backend.Core.Models
         private int _diskBufferDuration = 1800;
         private string _diskBufferFolder = string.Empty;
         private List<string> _diskBufferRecordedFolders = new List<string>();
-        private bool _diskBufferSaveSinceLastSave = true;
+        private bool _clearReplayBufferAfterSave = true;
         private List<Hotkey> _hotkeys;
         private List<GameSetting> _games = new List<GameSetting>();
         private bool _autoRecordGames = true;
@@ -104,8 +105,11 @@ namespace Segra.Backend.Core.Models
         private bool _showGameBackground = true;
         private bool _showAudioWaveformInTimeline = true;
         private bool _showBookmarksInFullscreen = true;
+        private bool _showVideoNavigation = true;
+        private bool _showLiveSessionCard = true;
         private bool _enableSeparateAudioTracks = false;
         private AudioOutputMode _audioOutputMode = AudioOutputMode.All;
+        private List<AppAudioCapture> _applicationAudioCaptures = new List<AppAudioCapture>();
         private string _videoQualityPreset = "high";
         private string _clipQualityPreset = "standard";
         private bool _confirmBeforeDeleting = false;
@@ -351,6 +355,10 @@ namespace Segra.Backend.Core.Models
             }
         }
 
+        // Codec replaced by the startup fallback, restored once it is available again
+        [JsonPropertyName("unavailableCodec")]
+        public Codec? UnavailableCodec { get; set; }
+
         [JsonPropertyName("storageLimit")]
         public int StorageLimit
         {
@@ -369,6 +377,35 @@ namespace Segra.Backend.Core.Models
             set
             {
                 _unlimitedStorage = value;
+            }
+        }
+
+        [JsonPropertyName("excludeClipsFromStorageLimit")]
+        public bool ExcludeClipsFromStorageLimit
+        {
+            get => _excludeClipsFromStorageLimit;
+            set
+            {
+                _excludeClipsFromStorageLimit = value;
+            }
+        }
+
+        [JsonPropertyName("autoDeleteOldContent")]
+        public bool AutoDeleteOldContent { get; set; } = false;
+
+        [JsonPropertyName("autoDeleteAfterDays")]
+        public int AutoDeleteAfterDays { get; set; } = 180;
+
+        [JsonPropertyName("autoDeleteClipsAndHighlights")]
+        public bool AutoDeleteClipsAndHighlights { get; set; } = false;
+
+        [JsonPropertyName("gameSubfolders")]
+        public bool GameSubfolders
+        {
+            get => _gameSubfolders;
+            set
+            {
+                _gameSubfolders = value;
             }
         }
 
@@ -529,19 +566,6 @@ namespace Segra.Backend.Core.Models
             }
         }
 
-        [JsonPropertyName("autoInstallUpdates")]
-        public bool AutoInstallUpdates
-        {
-            get => _autoInstallUpdates;
-            set
-            {
-                if (_autoInstallUpdates != value)
-                {
-                    _autoInstallUpdates = value;
-                }
-            }
-        }
-
         [JsonPropertyName("airplaneMode")]
         public bool AirplaneMode
         {
@@ -582,7 +606,7 @@ namespace Segra.Backend.Core.Models
         }
 
         // When false, Segra won't automatically start recording when a game launches.
-        // Explicit per-game entries (Record == true) still record, and manual recording still works.
+        // Per-game entries with Record == true still record, and manual recording still works.
         [JsonPropertyName("autoRecordGames")]
         public bool AutoRecordGames
         {
@@ -687,19 +711,13 @@ namespace Segra.Backend.Core.Models
             }
         }
 
-        // A disk buffer save covers footage since the previous save, mirroring the RAM buffer
-        // resetting after a save so the next save only holds new footage.
-        [JsonPropertyName("diskBufferSaveSinceLastSave")]
-        public bool DiskBufferSaveSinceLastSave
+        // When false, saving a replay keeps the buffer, so saves can overlap. The Disk Buffer mode reads
+        // this too: a save covers the window, or only what was recorded since the previous save.
+        [JsonPropertyName("clearReplayBufferAfterSave")]
+        public bool ClearReplayBufferAfterSave
         {
-            get => _diskBufferSaveSinceLastSave;
-            set
-            {
-                if (_diskBufferSaveSinceLastSave != value)
-                {
-                    _diskBufferSaveSinceLastSave = value;
-                }
-            }
+            get => _clearReplayBufferAfterSave;
+            set => _clearReplayBufferAfterSave = value;
         }
 
         // Legacy global flags, read only by the "per_device_input_options" migration, which copies them
@@ -928,6 +946,27 @@ namespace Segra.Backend.Core.Models
             }
         }
 
+        [JsonPropertyName("showVideoNavigation")]
+        public bool ShowVideoNavigation
+        {
+            get => _showVideoNavigation;
+            set => _showVideoNavigation = value;
+        }
+
+        [JsonPropertyName("showClipToolsOnClips")]
+        public bool ShowClipToolsOnClips { get; set; } = false;
+
+        // Only set by editing settings.json: enables browser shortcuts such as F12 (DevTools) and F5 (reload)
+        [JsonPropertyName("enableFrontendDebugShortcuts")]
+        public bool EnableFrontendDebugShortcuts { get; set; } = false;
+
+        [JsonPropertyName("showLiveSessionCard")]
+        public bool ShowLiveSessionCard
+        {
+            get => _showLiveSessionCard;
+            set => _showLiveSessionCard = value;
+        }
+
         [JsonPropertyName("enableSeparateAudioTracks")]
         public bool EnableSeparateAudioTracks
         {
@@ -953,6 +992,34 @@ namespace Segra.Backend.Core.Models
                 }
             }
         }
+
+        // Apps captured as separate application audio sources
+        [JsonPropertyName("applicationAudioCaptures")]
+        public List<AppAudioCapture> ApplicationAudioCaptures
+        {
+            get => _applicationAudioCaptures;
+            set
+            {
+                _applicationAudioCaptures = value ?? new List<AppAudioCapture>();
+            }
+        }
+
+        [JsonPropertyName("webcamEnabled")]
+        public bool WebcamEnabled { get; set; } = false;
+
+        [JsonPropertyName("webcamDeviceId")]
+        public string? WebcamDeviceId { get; set; } = null;
+
+        // Top-left of the overlay in percent of the canvas; default is the bottom-right corner
+        [JsonPropertyName("webcamX")]
+        public double WebcamX { get; set; } = 80;
+
+        [JsonPropertyName("webcamY")]
+        public double WebcamY { get; set; } = 80;
+
+        // Percent of the canvas width
+        [JsonPropertyName("webcamSize")]
+        public double WebcamSize { get; set; } = 20;
 
         [JsonPropertyName("videoQualityPreset")]
         public string VideoQualityPreset
@@ -1178,6 +1245,19 @@ namespace Segra.Backend.Core.Models
         public bool ForceMono { get; set; }
     }
 
+    public record AppAudioCapture
+    {
+        [JsonPropertyName("exe")]
+        public required string Exe { get; init; }
+
+        [JsonPropertyName("name")]
+        public required string Name { get; init; }
+
+        // Full exe path, used to show the icon when the app is not running
+        [JsonPropertyName("path")]
+        public string? Path { get; init; }
+    }
+
     // Equality comparer for DeviceSetting based on Id and Name
     public class DeviceSettingEqualityComparer : IEqualityComparer<DeviceSetting>
     {
@@ -1268,6 +1348,10 @@ namespace Segra.Backend.Core.Models
         // Global settings at start, so the frontend can flag changes that only apply to the next recording
         [JsonPropertyName("startSettings")]
         public JsonObject? StartSettings { get; set; }
+
+        // Webcam layout at start, with the session's webcam file when there is one
+        [JsonIgnore]
+        public WebcamLayer? Webcam { get; set; }
 
         // Lets saved replays pick up bookmarks that integrations add after the save
         public event Action<Bookmark>? BookmarkAdded;
@@ -1384,6 +1468,33 @@ namespace Segra.Backend.Core.Models
         public bool IsImported { get; set; } = false;
 
         public bool Compressed { get; set; } = false;
+
+        public WebcamLayer? Webcam { get; set; }
+    }
+
+    // A webcam recorded next to the video, shown on top of it in the editor and in clips
+    public class WebcamLayer
+    {
+        private string _filePath = string.Empty;
+        public string FilePath
+        {
+            get => _filePath;
+            set => _filePath = Segra.Backend.Shared.PathUtils.Normalize(value ?? string.Empty);
+        }
+
+        // Seconds into the video where the webcam video starts
+        public double Offset { get; set; }
+
+        // Top-left in percent of the video, size in percent of its width (16:9 box)
+        public double X { get; set; }
+        public double Y { get; set; }
+        public double Size { get; set; }
+
+        public bool Hidden { get; set; }
+
+        // The session's webcam output stopped on its own during the recording
+        [JsonIgnore]
+        public bool Failed { get; set; }
     }
 
     internal class AudioDevice : IEquatable<AudioDevice>
@@ -1527,7 +1638,8 @@ namespace Segra.Backend.Core.Models
     }
 
     // A single entry in the unified per-game settings list. Replaces the old whitelist/blacklist:
-    // Record == true means "always record this game" (old whitelist), false means "never record" (old blacklist).
+    // Record == true means "always record this game" (old whitelist), false means "never record" (old blacklist),
+    // null follows AutoRecordGames (played games are added this way).
     // Each override is null when the game inherits the corresponding global setting.
     public class GameSetting
     {
@@ -1552,7 +1664,7 @@ namespace Segra.Backend.Core.Models
         public string? CustomIcon { get; set; }
 
         [JsonPropertyName("record")]
-        public bool Record { get; set; } = true;
+        public bool? Record { get; set; } = true;
 
         [JsonPropertyName("qualityOverride")]
         public GameQualityOverride? QualityOverride { get; set; }
@@ -1727,5 +1839,8 @@ namespace Segra.Backend.Core.Models
 
         [JsonPropertyName("theFinals")]
         public GameIntegrationSettings TheFinals { get; set; } = new GameIntegrationSettings(true);
+
+        [JsonPropertyName("modernWarfare4")]
+        public GameIntegrationSettings ModernWarfare4 { get; set; } = new GameIntegrationSettings(true);
     }
 }

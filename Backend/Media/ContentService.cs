@@ -21,7 +21,7 @@ namespace Segra.Backend.Media
         /// Writes the metadata file for a video and returns the new content id, or null when it could not be written.
         /// The id is the file name of the metadata, thumbnail and waveform files.
         /// </summary>
-        public static async Task<string?> CreateMetadataFile(string filePath, Content.ContentType type, string game, List<Bookmark>? bookmarks = null, string? title = null, DateTime? createdAt = null, int? igdbId = null, bool isImported = false, List<string>? audioTrackNames = null, List<string>? audioTrackTypes = null, bool compressed = false, string? gameExePath = null)
+        public static async Task<string?> CreateMetadataFile(string filePath, Content.ContentType type, string game, List<Bookmark>? bookmarks = null, string? title = null, DateTime? createdAt = null, int? igdbId = null, bool isImported = false, List<string>? audioTrackNames = null, List<string>? audioTrackTypes = null, bool compressed = false, string? gameExePath = null, WebcamLayer? webcam = null)
         {
             bookmarks ??= [];
             filePath = PathUtils.Normalize(filePath);
@@ -75,7 +75,8 @@ namespace Segra.Backend.Media
                     IgdbId = igdbId,
                     GameExePath = gameExePath,
                     IsImported = isImported,
-                    Compressed = compressed
+                    Compressed = compressed,
+                    Webcam = webcam
                 };
 
                 string metadataJson = JsonSerializer.Serialize(metadataContent, _jsonOptions);
@@ -288,8 +289,12 @@ namespace Segra.Backend.Media
                     {
                         string? currentDir = Path.GetDirectoryName(content.FilePath);
                         string? typeFolder = currentDir != null ? Path.GetDirectoryName(currentDir) : null;
+                        string typeFolderName = FolderNames.GetVideoFolderName(content.Type);
 
-                        if (!string.IsNullOrEmpty(typeFolder))
+                        // Files saved without a game subfolder stay where they are
+                        if (!string.IsNullOrEmpty(typeFolder) &&
+                            string.Equals(Path.GetFileName(typeFolder), typeFolderName, StringComparison.OrdinalIgnoreCase) &&
+                            !string.Equals(Path.GetFileName(currentDir), typeFolderName, StringComparison.OrdinalIgnoreCase))
                         {
                             string newDir = PathUtils.Combine(typeFolder, newSanitized);
                             string candidatePath = PathUtils.Combine(newDir, Path.GetFileName(content.FilePath));
@@ -343,6 +348,111 @@ namespace Segra.Backend.Media
             }
 
             return changedCount;
+        }
+
+        private static readonly SemaphoreSlim _gameFolderMoveLock = new(1, 1);
+
+        /// <summary>
+        /// Moves videos in the recording folder into or out of game subfolders to match the setting.
+        /// </summary>
+        public static async Task ApplyGameSubfoldersAsync()
+        {
+            using var work = BackgroundWork.Begin();
+            await _gameFolderMoveLock.WaitAsync();
+            try
+            {
+                if (MigrationService.IsRunning)
+                    await MigrationService.WaitForMigrationsAsync();
+
+                bool useGameFolders = Settings.Instance.GameSubfolders;
+                string root = Settings.Instance.ContentFolder;
+                int moved = 0;
+                int failed = 0;
+
+                foreach (var content in AppState.Instance.Content.ToList())
+                {
+                    try
+                    {
+                        if (string.IsNullOrEmpty(content.FilePath) || !File.Exists(content.FilePath)) continue;
+
+                        string typeFolder = Path.GetFullPath(PathUtils.Combine(root, FolderNames.GetVideoFolderName(content.Type)));
+                        string currentDir = Path.GetFullPath(Path.GetDirectoryName(content.FilePath)!);
+                        bool isFlat = string.Equals(currentDir, typeFolder, StringComparison.OrdinalIgnoreCase);
+                        bool isInGameFolder = string.Equals(Path.GetDirectoryName(currentDir), typeFolder, StringComparison.OrdinalIgnoreCase);
+
+                        // Imported videos outside the recording folder are left alone
+                        if (useGameFolders ? !isFlat : !isInGameFolder) continue;
+
+                        string destDir = useGameFolders
+                            ? PathUtils.Combine(typeFolder, StorageService.SanitizeGameNameForFolder(content.Game ?? "Unknown"))
+                            : typeFolder;
+                        string destPath = PathUtils.Combine(destDir, Path.GetFileName(content.FilePath));
+
+                        if (File.Exists(destPath))
+                        {
+                            Log.Warning("Skipping move for {File}: destination already exists at {Dest}", content.FilePath, destPath);
+                            failed++;
+                            continue;
+                        }
+
+                        string sourcePath = content.FilePath;
+                        Directory.CreateDirectory(destDir);
+
+                        bool ok = await EmbeddedMetadataService.RunExclusiveAsync(async () =>
+                        {
+                            File.Move(sourcePath, destPath);
+
+                            string sidecar = FolderNames.GetMetadataFilePath(content.Type, content.Id);
+                            if (await UpdateMetadataFile(sidecar, c => c.FilePath = destPath) == null)
+                            {
+                                try
+                                {
+                                    File.Move(destPath, sourcePath);
+                                }
+                                catch (Exception ex)
+                                {
+                                    Log.Error("Could not move {Dest} back to {Source} after a metadata error: {Message}", destPath, sourcePath, ex.Message);
+                                }
+                                return false;
+                            }
+
+                            content.FilePath = destPath;
+                            return true;
+                        });
+
+                        if (!ok)
+                        {
+                            failed++;
+                            continue;
+                        }
+                        moved++;
+
+                        try
+                        {
+                            if (!useGameFolders && !Directory.EnumerateFileSystemEntries(currentDir).Any())
+                                Directory.Delete(currentDir);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning("Could not delete empty game folder {Dir}: {Message}", currentDir, ex.Message);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        failed++;
+                        Log.Warning("Could not move {File}: {Message}", content.FilePath, ex.Message);
+                    }
+                }
+
+                Log.Information("Moved {Moved} videos {Direction} game folders ({Failed} skipped)", moved, useGameFolders ? "into" : "out of", failed);
+                // Reload from the sidecars, a library reload during the run may have dropped moved videos
+                if (moved > 0)
+                    await SettingsService.LoadContentFromFolderIntoState();
+            }
+            finally
+            {
+                _gameFolderMoveLock.Release();
+            }
         }
 
         public static async Task CreateThumbnail(string filePath, Content.ContentType type, string? id)
@@ -552,7 +662,7 @@ namespace Segra.Backend.Media
             }
         }
 
-        public static async Task DeleteContent(string filePath, Content.ContentType type, string? id, bool sendToFrontend = true, bool reloadState = true)
+        public static async Task DeleteContent(string filePath, Content.ContentType type, string? id, bool sendToFrontend = true, bool reloadState = true, bool keepWebcam = false)
         {
             try
             {
@@ -622,6 +732,16 @@ namespace Segra.Backend.Media
                 string metadataFilePath = FolderNames.GetMetadataFilePath(type, id);
                 if (File.Exists(metadataFilePath))
                 {
+                    try
+                    {
+                        if (!keepWebcam)
+                            DeleteWebcamFile(JsonSerializer.Deserialize<Content>(File.ReadAllText(metadataFilePath))?.Webcam?.FilePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning($"Failed to read the webcam layer of {metadataFilePath}: {ex.Message}");
+                    }
+
                     File.Delete(metadataFilePath);
                     Log.Information($"Metadata file deleted: {metadataFilePath}");
                 }
@@ -670,6 +790,25 @@ namespace Segra.Backend.Media
                 {
                     await SettingsService.LoadContentFromFolderIntoState(sendToFrontend);
                 }
+            }
+        }
+
+        public static void DeleteWebcamFile(string? path)
+        {
+            if (string.IsNullOrEmpty(path))
+                return;
+
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                    Log.Information($"Webcam file deleted: {path}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"Failed to delete webcam file {path}: {ex.Message}");
             }
         }
 
@@ -947,6 +1086,49 @@ namespace Segra.Backend.Media
             catch (Exception ex)
             {
                 Log.Error($"Error handling RenameContent: {ex.Message}");
+            }
+        }
+
+        // Saves the editor's webcam visibility and position for one video
+        public static async Task HandleSetWebcamLayer(JsonElement message)
+        {
+            try
+            {
+                if (!message.TryGetProperty("Id", out JsonElement idElement) || idElement.GetString() is not string id)
+                {
+                    Log.Error("Id property not found in SetWebcamLayer message.");
+                    return;
+                }
+
+                Content? contentItem = AppState.Instance.Content.FirstOrDefault(c => c.Id == id);
+                if (contentItem?.Webcam == null)
+                {
+                    Log.Error($"No webcam layer found for {id}");
+                    return;
+                }
+
+                bool hidden = message.TryGetProperty("Hidden", out JsonElement hiddenElement) ? hiddenElement.GetBoolean() : contentItem.Webcam.Hidden;
+                double x = message.TryGetProperty("X", out JsonElement xElement) ? Math.Clamp(xElement.GetDouble(), 0, 100) : contentItem.Webcam.X;
+                double y = message.TryGetProperty("Y", out JsonElement yElement) ? Math.Clamp(yElement.GetDouble(), 0, 100) : contentItem.Webcam.Y;
+                double size = message.TryGetProperty("Size", out JsonElement sizeElement) ? Math.Clamp(sizeElement.GetDouble(), 5, 50) : contentItem.Webcam.Size;
+
+                var content = await UpdateMetadataFile(FolderNames.GetMetadataFilePath(contentItem.Type, id), c =>
+                {
+                    if (c.Webcam == null) return;
+                    c.Webcam.Hidden = hidden;
+                    c.Webcam.X = x;
+                    c.Webcam.Y = y;
+                    c.Webcam.Size = size;
+                });
+                if (content?.Webcam == null)
+                    return;
+
+                contentItem.Webcam = content.Webcam;
+                AppState.Instance.NotifyContentUpdated();
+            }
+            catch (Exception ex)
+            {
+                Log.Error($"Error handling SetWebcamLayer: {ex.Message}");
             }
         }
 

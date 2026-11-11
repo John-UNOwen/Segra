@@ -87,6 +87,7 @@ namespace Segra.Backend.Recorder
         private static readonly List<AudioInputCapture> _micSources = [];
         private static readonly List<AudioOutputCapture> _desktopSources = [];
         private static readonly List<(string Name, string Window, Source Source)> _voiceChatSources = [];
+        private static readonly List<(string Name, Source Source)> _appAudioSources = [];
 
         // Mixer mask of the shared "Voice Chat" track, so sources created mid-recording land on the same track
         private static uint _voiceChatMixerMask = 1u << 0;
@@ -133,9 +134,11 @@ namespace Segra.Backend.Recorder
 
 #if WINDOWS
         private static int _obsCheckPending;
+        private static DateTime _gameCaptureAddedAt;
         private const int ObsCheckDelayMs = 2000;
 #endif
 
+        private static int _freeingDiskSpace;
         private static bool _isStoppingOrStopped = false;
         private static ObsBoundsType _captureBoundsType = ObsBoundsType.ScaleInner;
         private static uint _currentBaseWidth;
@@ -303,11 +306,14 @@ namespace Segra.Backend.Recorder
                     Log.Warning($"Failed to save replay buffer: {ex.Message}");
                     return false;
                 }
+                Task<string?>? webcamSave = BeginWebcamReplaySave();
 
                 string? savedPath = await WaitForReplaySavedAsync(request);
+                string? webcamPath = await EndWebcamReplaySave(webcamSave);
 
                 if (string.IsNullOrEmpty(savedPath))
                 {
+                    ContentService.DeleteWebcamFile(webcamPath);
                     string reason = request.FailureReason ?? "OBS did not confirm the replay was written. See the logs for details.";
                     Log.Error($"Replay buffer save failed: {reason}");
                     await MessageService.ShowModal("Replay Save Failed", reason, "error");
@@ -317,11 +323,11 @@ namespace Segra.Backend.Recorder
                 savedPath = PathUtils.Normalize(savedPath);
                 Log.Information($"Replay buffer saved to: {savedPath}");
 
-                await FinalizeSavedReplayAsync(savedPath, request, recording, requestedAt);
+                await FinalizeSavedReplayAsync(savedPath, request, recording, requestedAt, webcamPath: webcamPath);
 
-                // Restart replay buffer so subsequent saves only include new footage, unless a
-                // recording stop began while the save was completing.
-                if (!_isStoppingOrStopped)
+                // Restart replay buffer so subsequent saves only include new footage, unless the
+                // user turned clearing off or a recording stop began while the save was completing.
+                if (!_isStoppingOrStopped && Settings.Instance.ClearReplayBufferAfterSave)
                     await ResetReplayBuffer();
 
                 return true;
@@ -368,16 +374,19 @@ namespace Segra.Backend.Recorder
         /// it is readable, create the metadata/thumbnail/waveform sidecars, refresh the content
         /// list and copy the recording's bookmarks that fall inside the saved replay.
         /// </summary>
-        private static async Task FinalizeSavedReplayAsync(string savedPath, ReplaySaveRequest request, Recording? recording, DateTime requestedAt, Func<DateTime, TimeSpan>? positionFor = null)
+        private static async Task FinalizeSavedReplayAsync(string savedPath, ReplaySaveRequest request, Recording? recording, DateTime requestedAt, Func<DateTime, TimeSpan>? positionFor = null, string? webcamPath = null)
         {
             // The file is fully written at this point; let the frontend confirm the save.
             _ = MessageService.SendFrontendMessage("ReplayBufferSaved", new { });
 
             // Ensure file is fully written to disk/network before thumbnail generation
             await EnsureFileReady(savedPath);
+            WebcamLayer? webcam = await FinishWebcamLayer(recording?.Webcam, webcamPath, savedPath);
 
             // Create metadata for the buffer recording
-            string? bufferId = await ContentService.CreateMetadataFile(savedPath, Content.ContentType.Buffer, request.Game, igdbId: request.IgdbId, audioTrackNames: request.AudioTrackNames, audioTrackTypes: request.AudioTrackTypes, gameExePath: request.ExePath);
+            string? bufferId = await ContentService.CreateMetadataFile(savedPath, Content.ContentType.Buffer, request.Game, igdbId: request.IgdbId, audioTrackNames: request.AudioTrackNames, audioTrackTypes: request.AudioTrackTypes, gameExePath: request.ExePath, webcam: webcam);
+            if (bufferId == null)
+                ContentService.DeleteWebcamFile(webcam?.FilePath);
             await ContentService.CreateThumbnail(savedPath, Content.ContentType.Buffer, bufferId);
             await ContentService.CreateWaveformFile(savedPath, Content.ContentType.Buffer, bufferId);
 
@@ -579,6 +588,7 @@ namespace Segra.Backend.Recorder
                 Log.Information("Resetting replay buffer...");
 
                 bool started = await buffer.ResetAsync(TimeSpan.FromSeconds(30));
+                await ResetWebcamReplayBuffer();
 
                 if (!started)
                 {
@@ -741,11 +751,16 @@ namespace Segra.Backend.Recorder
             {
                 Log.Error($"OBS installation failed: {ex.Message}");
 #if WINDOWS
+                // A running game keeps the previous graphics-hook loaded, so the update can't replace it
+                bool hookInUse = ex is UnauthorizedAccessException or IOException
+                    && ex.Message.Contains("graphics-hook", StringComparison.OrdinalIgnoreCase);
                 await MessageService.ShowModal(
                     "Recorder Error",
-                    "The recorder installation failed. Please check your internet connection and try again. If you have any games running, please close them and restart Segra.",
+                    hookInUse
+                        ? "The recorder could not be updated because a game is still using the old capture hook. Please close all games, then restart Segra."
+                        : "The recorder installation failed. Please check your internet connection and try again. If you have any games running, please close them and restart Segra.",
                     "error",
-                    "Could not install recorder"
+                    hookInUse ? "Close your game and restart Segra" : "Could not install recorder"
                 );
 #else
                 await MessageService.ShowModal(
@@ -1619,6 +1634,8 @@ namespace Segra.Backend.Recorder
                 _videoEncoder = new VideoEncoder(encoderId, "Segra Recorder", videoEncoderSettings);
             }
 
+            AddWebcam(encoderId, eff);
+
             // Without a microphone, Linux's default input is a speaker monitor, which would record the desktop audio twice
             bool skipDefaultInput = false;
 #if !WINDOWS
@@ -1716,6 +1733,24 @@ namespace Segra.Backend.Recorder
                 }
             }
 
+#if WINDOWS
+            // Desktop audio already contains these apps, so they are only added on top of game audio
+            if (useGameAudio)
+            {
+                // Skip apps already captured by the game audio or voice chat sources
+                var capturedExes = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { _captureWindowSpec!.Split(':')[^1] };
+                if (audioOutputMode == AudioOutputMode.GameAndDiscord)
+                    capturedExes.UnionWith(VoiceChatApps.Select(a => a.Window.Split(':')[^1]));
+
+                foreach (var app in Settings.Instance.ApplicationAudioCaptures
+                    .Where(a => !string.IsNullOrWhiteSpace(a.Exe) && !capturedExes.Contains(a.Exe))
+                    .DistinctBy(a => a.Exe, StringComparer.OrdinalIgnoreCase))
+                {
+                    TryAddApplicationAudioSource(app.Exe, app.Name);
+                }
+            }
+#endif
+
             // Configure mixers and audio encoders based on setting.
             // If enabled: Track 1 = Full Mix, Tracks 2..6 = per-group isolated (up to 5 groups)
             // If disabled: Track 1 only (Full Mix)
@@ -1752,6 +1787,12 @@ namespace Segra.Backend.Recorder
                 }
             }
 
+            foreach (var (_, appSource) in _appAudioSources)
+            {
+                trackGroups.Add([appSource]);
+                trackGroupTypes.Add("output");
+            }
+
             // Build list of device names for encoder naming
             var audioDeviceNames = new List<string>();
             if (Settings.Instance.InputDevices != null)
@@ -1776,9 +1817,12 @@ namespace Segra.Backend.Recorder
                 audioDeviceNames.Add("Game Audio");
                 if (audioOutputMode == AudioOutputMode.GameAndDiscord)
                 {
-                    audioDeviceNames.Add("Voice Chat");
+                    // Named after the voice chat app running at start, if there is just one kind
+                    var voiceApps = _voiceChatSources.Select(v => v.Name.StartsWith("Discord") ? "Discord" : "TeamSpeak").Distinct().ToList();
+                    audioDeviceNames.Add(voiceApps.Count == 1 ? voiceApps[0] : "Voice Chat");
                 }
             }
+            audioDeviceNames.AddRange(_appAudioSources.Select(a => a.Name));
 
             bool separateTracks = Settings.Instance.EnableSeparateAudioTracks;
             int maxTracks = ObsAudioTrackLimit.Value;
@@ -1838,10 +1882,8 @@ namespace Segra.Backend.Recorder
                 _audioEncoders.Add(audioEncoder);
             }
 
-            // Paths for session recordings and buffer, organized by game
-            string sanitizedGameName = StorageService.SanitizeGameNameForFolder(name);
-            string sessionDir = PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Sessions, sanitizedGameName);
-            string bufferDir = PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Buffers, sanitizedGameName);
+            string sessionDir = StorageService.GetOutputFolder(PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Sessions), name);
+            string bufferDir = StorageService.GetOutputFolder(PathUtils.Combine(Settings.Instance.ContentFolder, FolderNames.Buffers), name);
             if (!Directory.Exists(sessionDir)) Directory.CreateDirectory(sessionDir);
             if (!Directory.Exists(bufferDir)) Directory.CreateDirectory(bufferDir);
 
@@ -1923,7 +1965,7 @@ namespace Segra.Backend.Recorder
 
                 _output.Stopped += OnOutputStopped;
 
-                if (!DiskBufferService.Start(_output, sanitizedGameName, eff.DiskBufferDuration))
+                if (!DiskBufferService.Start(_output, StorageService.SanitizeGameNameForFolder(name), eff.DiskBufferDuration))
                 {
                     // Start disposes the output on every path where it refuses the start, so this only
                     // drops our reference; the muxer and its Stopped connection are already released.
@@ -1937,6 +1979,8 @@ namespace Segra.Backend.Recorder
                     return false;
                 }
             }
+
+            WebcamLayer? webcamLayer = CreateWebcamOutputs(_bufferOutput != null, _output != null, videoOutputPath, eff);
 
             // Overwrite the file name with the hooked executable name if using game hook
             fileName = _hookedExecutableFileName ?? fileName;
@@ -2005,6 +2049,8 @@ namespace Segra.Backend.Recorder
                 Log.Information("Replay buffer started successfully");
             }
 
+            StartWebcamOutputs(webcamLayer);
+
             // The always-on buffer is not a recording: no card, tray state, priority boost or integrations
             if (alwaysOn)
             {
@@ -2015,7 +2061,8 @@ namespace Segra.Backend.Recorder
                     FileName = fileName,
                     ExePath = exePath,
                     AudioTrackNames = actualAudioTrackNames,
-                    AudioTrackTypes = actualAudioTrackTypes
+                    AudioTrackTypes = actualAudioTrackTypes,
+                    Webcam = webcamLayer
                 };
                 AppState.Instance.AlwaysOnBufferActive = true;
                 return true;
@@ -2034,10 +2081,17 @@ namespace Segra.Backend.Recorder
                 CoverImageId = GameUtils.GetCoverImageIdFromExePath(exePath),
                 AudioTrackNames = actualAudioTrackNames,
                 AudioTrackTypes = actualAudioTrackTypes,
-                StartSettings = startSettings
+                StartSettings = startSettings,
+                Webcam = webcamLayer
             };
             AppState.Instance.PreRecording = null;
             _ = MessageService.SendStateToFrontend("OBS Start recording");
+
+            if (GameSettingsService.AddPlayedGame(name, exePath, null))
+            {
+                SettingsService.SaveSettings();
+                _ = MessageService.SendSettingsToFrontend("Added played game");
+            }
 
             RecordingPreviewService.OnRecordingStarted((uint)eff.FrameRate);
 
@@ -2458,6 +2512,7 @@ namespace Segra.Backend.Recorder
                             await WaitForInFlightReplaySaveAsync();
                             StopOutput(_bufferOutput, "replay buffer");
                         }
+                        BeginStopWebcamRecording();
                         if (DiskBufferService.IsActive)
                         {
                             // Stops the disk buffer output (after any in-flight disk save), disposes
@@ -2468,6 +2523,7 @@ namespace Segra.Backend.Recorder
                         {
                             StopOutput(_output, "recording");
                         }
+                        StopWebcamOutputs();
                     }
                     catch (Exception ex)
                     {
@@ -2526,6 +2582,7 @@ namespace Segra.Backend.Recorder
                         {
                             Log.Warning($"Failed to delete discarded session file: {ex.Message}");
                         }
+                        ContentService.DeleteWebcamFile(session.Webcam?.FilePath);
                     }
                     else
                     {
@@ -2535,7 +2592,10 @@ namespace Segra.Backend.Recorder
                         int? igdbId = !string.IsNullOrEmpty(session.ExePath)
                             ? GameUtils.GetIgdbIdFromExePath(session.ExePath)
                             : null;
-                        sessionContentId = await ContentService.CreateMetadataFile(filePath, Content.ContentType.Session, session.Game, session.Bookmarks, igdbId: igdbId, audioTrackNames: session.AudioTrackNames, audioTrackTypes: session.AudioTrackTypes, gameExePath: session.ExePath);
+                        WebcamLayer? webcam = await FinishWebcamLayer(session.Webcam, session.Webcam?.FilePath, filePath);
+                        sessionContentId = await ContentService.CreateMetadataFile(filePath, Content.ContentType.Session, session.Game, session.Bookmarks, igdbId: igdbId, audioTrackNames: session.AudioTrackNames, audioTrackTypes: session.AudioTrackTypes, gameExePath: session.ExePath, webcam: webcam);
+                        if (sessionContentId == null)
+                            ContentService.DeleteWebcamFile(webcam?.FilePath);
                         await ContentService.CreateThumbnail(filePath, Content.ContentType.Session, sessionContentId);
                         // Decoding a long session's audio takes seconds, so it doesn't hold up the finishing state
                         var waveformWork = BackgroundWork.Begin();
@@ -2556,6 +2616,7 @@ namespace Segra.Backend.Recorder
 
                 await SettingsService.LoadContentFromFolderIntoState(false);
                 await StorageService.EnsureStorageBelowLimit();
+                await StorageService.DeleteExpiredContent();
 
                 // If the recording is not a replay buffer recording, AI is enabled and auto generate highlights is enabled -> analyze the video!
                 if (Settings.Instance.EnableAi && Settings.Instance.AutoGenerateHighlights && sessionContentId != null && session!.Bookmarks.Any(b => b.Type.IncludeInHighlight()))
@@ -2709,6 +2770,7 @@ namespace Segra.Backend.Recorder
                 WaitForInFlightReplaySaveAsync().GetAwaiter().GetResult();
                 if (_bufferOutput?.Stop(waitForCompletion: true, timeoutMs: 30000) == false)
                     _bufferOutput.ForceStop();
+                StopWebcamOutputs();
             }
             finally
             {
@@ -2762,7 +2824,8 @@ namespace Segra.Backend.Recorder
                 s.Resolution, s.FrameRate, s.RateControl, s.Bitrate, s.MinBitrate, s.MaxBitrate, s.CrfValue, s.CqLevel,
                 s.Codec?.InternalEncoderId, s.EnableHdr, s.Stretch4By3, s.ReplayBufferDuration, s.ReplayBufferMaxSize,
                 s.InputDevices, s.OutputDevices, s.EnableSeparateAudioTracks,
-                s.SelectedDisplay?.DeviceId, s.ContentFolder, AppState.Instance.Displays
+                s.SelectedDisplay?.DeviceId, s.ContentFolder, AppState.Instance.Displays,
+                s.WebcamEnabled, s.WebcamDeviceId
             });
         }
 
@@ -2819,6 +2882,7 @@ namespace Segra.Backend.Recorder
                         DiskBufferService.ForceStop();
                     if (outputActive)
                         _output!.ForceStop();
+                    ForceStopWebcamOutputs();
 
                     StopAlwaysOnBufferCore();
                     recording = AppState.Instance.Recording != null;
@@ -3113,6 +3177,24 @@ namespace Segra.Backend.Recorder
             }
         }
 
+        private static void TryAddApplicationAudioSource(string exe, string? displayName)
+        {
+            string exeName = Path.GetFileNameWithoutExtension(exe);
+            string name = string.IsNullOrWhiteSpace(displayName) ? exeName : displayName;
+            try
+            {
+                var source = new ApplicationAudioCapture($"{exeName} Audio")
+                    .SetWindow($"*:*:{exe}", ApplicationAudioCapture.WindowPriority.Executable);
+                _mainScene!.AddSource(source);
+                _appAudioSources.Add((name, source));
+                Log.Information($"Added application audio capture source for {exe}");
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"Failed to create application audio capture source for {exe}: {ex.Message}");
+            }
+        }
+
         /// <summary>
         /// Called by GameDetectionService's process watcher. Starts capturing a voice chat app
         /// that launches while a GameAndDiscord-mode recording is active.
@@ -3182,6 +3264,7 @@ namespace Segra.Backend.Recorder
             DisposeDisplaySource();
             DisposeWindowCaptureSource();
             DisposeGameCaptureSource();
+            DisposeWebcamSource();
             _captureWindowSpec = null;
 
             if (_mainScene != null)
@@ -3268,6 +3351,19 @@ namespace Segra.Backend.Recorder
                 }
             }
             _voiceChatSources.Clear();
+
+            foreach (var (appName, appSource) in _appAudioSources)
+            {
+                try
+                {
+                    appSource.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning($"Failed to dispose {appName} audio source: {ex.Message}");
+                }
+            }
+            _appAudioSources.Clear();
         }
 
         public static void DisposeGameCaptureSource()
@@ -3326,6 +3422,7 @@ namespace Segra.Backend.Recorder
             {
                 GameCaptureSource = new GameCapture("gameplay", GameCapture.CaptureMode.SpecificWindow);
                 GameCaptureSource.SetWindow(windowSpec);
+                _gameCaptureAddedAt = DateTime.Now;
 
                 // OBS can't auto-detect HDR game capture and defaults a 10-bit (R10G10B10A2)
                 // swapchain to sRGB, which looks washed out. Force Rec.2100 PQ.
@@ -3405,7 +3502,7 @@ namespace Segra.Backend.Recorder
                 if (_isStoppingOrStopped || _mainScene == null || _captureWindowSpec == null || AppState.Instance.Recording == null) return;
 
                 bool obsActive = ObsStudioOutput.IsStreamingOrRecording();
-                if (obsActive && GameCaptureSource != null)
+                if (GameCaptureSource != null && (obsActive || ObsStudioOutput.IsHookingGame(_captureWindowSpec.Split(':')[^1], _gameCaptureAddedAt)))
                     ReleaseGameCaptureToObs(gameWindow);
                 else if (!obsActive && GameCaptureSource == null && !IsGameHookTaken(_captureWindowSpec.Split(':')[^1]))
                     RetryGameCapture();
@@ -3422,7 +3519,7 @@ namespace Segra.Backend.Recorder
 
         private static void ReleaseGameCaptureToObs(IntPtr gameWindow)
         {
-            Log.Information("OBS Studio is streaming or recording, releasing game capture");
+            Log.Information("OBS Studio wants the game hook, releasing game capture");
 
             // A late hook would remove the fallbacks added below
             GameCaptureSource!.Hooked -= OnGameCaptureHookedEvent;
@@ -4056,6 +4153,55 @@ namespace Segra.Backend.Recorder
                 if (freeBytes == null || freeBytes.Value >= GetRecordingFreeSpaceThresholdBytes())
                     return;
 
+                if (Settings.Instance.UnlimitedStorage)
+                {
+                    StopForLowDiskSpace(freeBytes.Value, driveLabel);
+                    return;
+                }
+
+                // A cleanup can outlast the next tick
+                if (Interlocked.CompareExchange(ref _freeingDiskSpace, 1, 0) != 0)
+                    return;
+
+                string? recordingPath = AppState.Instance.Recording?.FilePath;
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        long threshold = GetRecordingFreeSpaceThresholdBytes();
+                        // Enough headroom that the next checks don't delete one file at a time
+                        long target = threshold + EstimateRecordingBytesPerSecond() * 600;
+                        if (await StorageService.TryFreeSpaceForRecording(threshold, target, recordingPath))
+                            return;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning($"Failed to free disk space during recording: {ex.Message}");
+                    }
+                    finally
+                    {
+                        Interlocked.Exchange(ref _freeingDiskSpace, 0);
+                    }
+
+                    // The cleanup can outlast the recording it was started for
+                    if (AppState.Instance.Recording?.FilePath != recordingPath)
+                        return;
+
+                    long? currentFree = StorageService.GetContentDriveFreeBytes();
+                    if (currentFree != null && currentFree.Value < GetRecordingFreeSpaceThresholdBytes())
+                        StopForLowDiskSpace(currentFree.Value, driveLabel);
+                });
+            }
+            catch (Exception ex)
+            {
+                Log.Warning($"Disk space monitor check failed: {ex.Message}");
+            }
+        }
+
+        private static void StopForLowDiskSpace(long freeBytes, string driveLabel)
+        {
+            try
+            {
                 // Only act once, and not if a failure stop (e.g. OBS output stop) is already being handled.
                 if (Interlocked.CompareExchange(ref _unexpectedStopHandled, 1, 0) != 0)
                     return;
@@ -4067,7 +4213,7 @@ namespace Segra.Backend.Recorder
                 // loop from immediately retrying until the user switches foreground window.
                 GameDetectionService.PreventRetryRecording = true;
 
-                double freeMb = freeBytes.Value / (1024.0 * 1024.0);
+                double freeMb = freeBytes / (1024.0 * 1024.0);
                 long thresholdMb = GetRecordingFreeSpaceThresholdBytes() / (1024 * 1024);
                 Log.Warning($"{driveLabel} low on space ({freeMb:F0} MB free, threshold {thresholdMb} MB). Stopping recording to finalize the file safely.");
 
@@ -4191,6 +4337,8 @@ namespace Segra.Backend.Recorder
 
             try { _bufferOutput?.Dispose(); } catch (Exception ex) { Log.Warning($"Error disposing buffer output: {ex.Message}"); }
             _bufferOutput = null;
+
+            DisposeWebcamOutputs();
         }
 
 #if WINDOWS
@@ -4234,9 +4382,9 @@ namespace Segra.Backend.Recorder
                     }
                 }
 
-#if DEBUG
-                // Dev builds skip the compatibility filter so every version is selectable for testing.
-                Log.Information($"Debug build: showing all OBS versions: {string.Join(", ", (response ?? []).Select(v => v.Version))}");
+#if DEBUG || LOCAL_BUILD
+                // Dev and local builds skip the compatibility filter so every version is selectable for testing.
+                Log.Information($"Debug or local build: showing all OBS versions: {string.Join(", ", (response ?? []).Select(v => v.Version))}");
 #else
                 // Filter versions based on current Segra version compatibility
                 if (response != null && response.Count > 0)
@@ -4382,7 +4530,7 @@ namespace Segra.Backend.Recorder
             {
                 versionToDownload = AppState.Instance.AvailableOBSVersions
                     .Where(v => !v.IsBeta)
-                    .OrderByDescending(v => v.Version)
+                    .OrderByDescending(v => System.Version.TryParse(v.Version, out var parsed) ? parsed : new System.Version(0, 0))
                     .FirstOrDefault();
 
                 Log.Information($"Using latest stable OBS version: {versionToDownload?.Version}");
@@ -4642,16 +4790,31 @@ namespace Segra.Backend.Recorder
             // A pending migration can still rename the saved codec id
             await MigrationService.WaitForMigrationsAsync();
 
+            static bool IsAvailable(Codec? c) =>
+                c != null && AppState.Instance.Codecs.Any(a => a.InternalEncoderId.Equals(c.InternalEncoderId, StringComparison.OrdinalIgnoreCase));
+
             var codec = Settings.Instance.Codec;
-            if (codec == null || !AppState.Instance.Codecs.Any(c => c.InternalEncoderId.Equals(codec.InternalEncoderId, StringComparison.OrdinalIgnoreCase)))
+            var unavailable = Settings.Instance.UnavailableCodec;
+            if (unavailable != null && IsAvailable(unavailable))
+            {
+                Log.Information($"Codec '{unavailable.FriendlyName}' is available again, switched back from '{codec?.FriendlyName}'");
+                Settings.Instance.Codec = unavailable;
+                Settings.Instance.UnavailableCodec = null;
+                SettingsService.SaveSettings();
+                _ = MessageService.SendSettingsToFrontend("Codec restored");
+                return;
+            }
+
+            if (!IsAvailable(codec))
             {
                 Settings.Instance.Codec = SelectDefaultCodec(Settings.Instance.Encoder, AppState.Instance.Codecs);
                 if (codec != null)
                 {
+                    Settings.Instance.UnavailableCodec ??= codec;
                     Log.Information($"Codec '{codec.FriendlyName}' is no longer available, switched to '{Settings.Instance.Codec?.FriendlyName}'");
                     _ = Task.Run(() => MessageService.ShowModal(
                         "Codec changed",
-                        $"The codec {codec.FriendlyName} is no longer available on this system, likely because the GPU was changed. Segra will use {Settings.Instance.Codec?.FriendlyName} instead. You can change it in Settings.",
+                        $"The codec {codec.FriendlyName} is no longer available on this system, likely because the GPU was changed or disabled. Segra will use {Settings.Instance.Codec?.FriendlyName} until it is available again.",
                         "warning"));
                     SettingsService.SaveSettings();
                     _ = MessageService.SendSettingsToFrontend("Codec fallback");
